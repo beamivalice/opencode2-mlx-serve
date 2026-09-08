@@ -76,12 +76,11 @@ export const ALL_SECTIONS: readonly SectionName[] = [
 ]
 
 /**
- * What the sidebar draws by default. `turn` is left out: the speed meter lives in
- * the prompt footer, so repeating it above would be the same measurement twice.
- * `attach` is never in either list by default — it is about this plugin, not the
- * server, and it appears by itself when something is broken.
+ * Names a user may write in `sections`. `attach` is outside `ALL_SECTIONS` — it
+ * is about this plugin rather than the server, and `buildSections` splices it in
+ * by itself when something broke — but asking for it explicitly is allowed.
  */
-export const DEFAULT_SECTIONS: readonly SectionName[] = [...ALL_SECTIONS]
+const KNOWN_SECTIONS: readonly SectionName[] = [...ALL_SECTIONS, "attach"]
 
 export const SECTION_TITLES: Readonly<Record<SectionName, string>> = {
   turn: "Turn",
@@ -102,7 +101,7 @@ export const SECTION_TITLES: Readonly<Record<SectionName, string>> = {
  */
 export function resolveSections(raw: unknown, fallback: readonly SectionName[] = ALL_SECTIONS): SectionName[] {
   if (!Array.isArray(raw)) return [...fallback]
-  const known = new Set<string>(ALL_SECTIONS)
+  const known = new Set<string>(KNOWN_SECTIONS)
   return raw.filter((name): name is SectionName => typeof name === "string" && known.has(name))
 }
 
@@ -397,6 +396,12 @@ function acceptNote(s: SpecStats, drafted: number, cells: number): string {
   return cells > 0 ? `· ${fmtCount(s.accepts)}/${fmtCount(drafted)}` : `· ${fmtCount(s.accepts)}/${fmtCount(drafted)} drafts`
 }
 
+/** `age 20m00s ago` when the newest [spec-stats] line is older than our attention span. */
+function ageRow(observed: Observed<unknown>, now: number): SidebarRow | null {
+  const age = Math.max(0, now - observed.at)
+  return age < 90_000 ? null : row("age", `${fmtDur(age)} ago`)
+}
+
 function specRows(observed: Observed<SpecStats> | null, now: number, cells: number): SidebarRow[] {
   const s = observed?.value
   if (!s || !observed) return []
@@ -429,6 +434,8 @@ function specRows(observed: Observed<SpecStats> | null, now: number, cells: numb
   if (s.runtimeDisabled) {
     rows.push(row("gate", "off", `· ${s.reason ?? "adaptive"} → ${s.adaptive ?? "serial"}`, "warn"))
   }
+  const aged = rows.length > 0 ? ageRow(observed, now) : null
+  if (aged) rows.push(aged)
   return rows
 }
 
@@ -496,7 +503,11 @@ function logRows(input: PanelInput): SidebarRow[] {
   const status = feedStatus(input.link)
   const head = row("feed", status.value, log === null && input.link === "live" ? "· log tail off" : undefined, status.tone)
   const totals = input.service === null ? [] : totalsRows(input.service, input.sampling?.value ?? null)
-  if (!log) return [head, ...totals, row("log", "not tailed", "· logPath off")]
+  // No file: either the operator turned the tail off, or no server has answered
+  // yet and there is nothing to say which of the log directory's files is this run's.
+  if (!log) {
+    return [head, ...totals, row("log", "not tailed", input.logDisabled === false ? "· waiting for a server" : "· logPath off")]
+  }
 
   if (log.error !== null || log.bytes === null) {
     return [head, ...totals, row("log", log.name, `· ${log.error ?? "unreadable"}`, "warn")]
@@ -549,12 +560,12 @@ export interface PanelInput {
   /** Sparkline width in cells; 0 turns the sparkline off. */
   readonly sparkCells: number
   readonly now: number
-  /** `ui.format.path` from the host, so the toast abbreviates $HOME like the rest of the TUI. */
-  readonly formatPath?: (path: string) => string
   /** Filled in by `buildSections`: rates the Turn section already drew. */
   readonly turnRates?: ReadonlyMap<string, number>
   /** Width of the prefill progress bar in cells; 0 draws the plain rate instead. */
   readonly barCells?: number
+  /** The tail is off by configuration (`logPath: "off"`), rather than not attached yet. */
+  readonly logDisabled?: boolean
   /** Host integrations that threw (a refused slot, a missing API). */
   readonly attachErrors?: readonly { where: string; detail: string }[]
   /** The declared wired ceiling (cli.json, or `iogpu.wired_limit_mb`), in GiB. */
@@ -582,8 +593,6 @@ function rowsFor(name: SectionName, input: PanelInput): SidebarRow[] {
   const s = input.service
   const inflight = inflightOf(input)
   switch (name) {
-    case "turn":
-      return turnRows(input.speed, inflight, input.barCells ?? 0)
     case "throughput":
       return s === null ? [] : throughputRows(s, input.sparkCells, input.turnRates ?? new Map(), inflight)
     case "server":
@@ -611,7 +620,7 @@ function rowsFor(name: SectionName, input: PanelInput): SidebarRow[] {
  * which numbers are already on screen.
  */
 export function buildSections(input: PanelInput, enabled: readonly SectionName[]): SidebarSection[] {
-  const turn = enabled.includes("turn") ? turnRows(input.speed, inflightOf(input)) : []
+  const turn = enabled.includes("turn") ? turnRows(input.speed, inflightOf(input), input.barCells ?? 0) : []
   // Derived once for every section: the rates the turn meter already drew (so
   // Throughput does not repeat one) and the link state (so the panel is never
   // silently empty).
@@ -631,6 +640,12 @@ export function buildSections(input: PanelInput, enabled: readonly SectionName[]
       ...(gauge === null ? {} : { note: gauge.note }),
       rows,
     })
+  }
+  // The panel is where a broken host integration is named, so the section shows
+  // up whether or not anybody listed it.
+  if (!enabled.includes("attach") && (input.attachErrors?.length ?? 0) > 0) {
+    const rows = attachRows(derived)
+    if (rows.length > 0) sections.push({ name: "attach", title: SECTION_TITLES.attach, rows })
   }
   return sections
 }

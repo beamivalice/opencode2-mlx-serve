@@ -58,11 +58,9 @@ function speed(overrides: Partial<SpeedValue> = {}): SpeedValue {
     prefillTps: 4200,
     genTokens: 1400,
     genTps: 24.6,
-    ramGb: 73.3,
     ttftMs: 430,
     elapsedMs: 62_000,
     tokensEstimated: false,
-    metricsOk: true,
     ...overrides,
   }
 }
@@ -431,13 +429,14 @@ test("spec modes without a fixed depth report tokens per round", () => {
   assert.deepEqual(section("spec", input({ spec: observed(pld) })), ["accept 1.49 tok/round · 612/410 rounds"])
 })
 
-test("a stale spec line still shows its numbers, unaged", () => {
+test("a stale spec line keeps its numbers and says how old they are", () => {
   const old = observed(parseSpecStats(MTP_LINE)!, NOW - 20 * 60_000)
   assert.deepEqual(section("spec", input({ spec: old })), [
     "accept 67.7% · 191/282 drafts",
     "per round 1.14 tok · 168 rounds",
     "round 47ms · sync 2.93ms",
-  ], "the acceptance of the last finished request is still true 20 minutes later")
+    "age 20m00s ago",
+  ], "the tally is still true, but it is yesterday's request")
 })
 
 // --- sampling --------------------------------------------------------------
@@ -614,4 +613,44 @@ test("resolveSections is permissive about typos and strict about order", () => {
   assert.deepEqual(resolveSections(["log", "turn"]), ["log", "turn"])
   assert.deepEqual(resolveSections(["turn", "bogus"]), ["turn"])
   assert.deepEqual(resolveSections([]), [], "an explicit empty list draws only the header")
+})
+
+// --- regressions -----------------------------------------------------------
+
+test("the Turn section draws the prefill bar buildSections was given cells for", () => {
+  const prefilling = speed({
+    phase: "prefill",
+    prefillTokens: 12_400,
+    prefillBaseline: 48_000,
+    prefillTps: 1_600,
+    genTps: null,
+    ttftMs: null,
+  })
+  assert.deepEqual(section("turn", input({ speed: prefilling, barCells: 18 })), [
+    "prefill █████░░░░░░░░░░░░░ 12.4k/~48.0k",
+    "1600 t/s · ~22s left",
+  ])
+})
+
+test("attach can be asked for, and shows up uninvited when something broke", () => {
+  assert.deepEqual(resolveSections(["attach", "log"]), ["attach", "log"], "attach is a name a user may write")
+  assert.equal(resolveSections(undefined).includes("attach"), false, "but it is not a default")
+  const broken = input({ attachErrors: [{ where: "slot", detail: "denied" }] })
+  const names = buildSections(broken, ["log"]).map((s) => s.name)
+  assert.deepEqual(names.at(-1), "attach", "a failed integration names itself even when nobody listed it")
+  assert.equal(buildSections(broken, ["attach", "log"]).filter((s) => s.name === "attach").length, 1, "and only once")
+})
+
+test("no tail yet is not the same as a tail turned off", () => {
+  assert.equal(
+    logRowsOf(null).at(-1),
+    "log not tailed · logPath off",
+    "logPath off, by configuration",
+  )
+  const waiting = buildSections(input({ log: null, logDisabled: false }), ["log"])[0]?.rows ?? []
+  assert.equal(
+    text(waiting).at(-1),
+    "log not tailed · waiting for a server",
+    "no server has answered, so no log file has been claimed",
+  )
 })

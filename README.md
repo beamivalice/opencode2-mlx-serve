@@ -11,6 +11,7 @@ GET /metrics.json   counters, gauges, histograms        (needs the server's --me
 GET /props          memory headroom, n-gram warm total  (optional)
 GET /v1/models      model, kv quant, MTP head           (optional)
 tail  ~/.mlx-serve/logs/mlx-serve-<port>.log            [spec-stats], request lines, cache tiers
+      (the port that answered /metrics.json, not the one configured)
 ```
 
 MTP acceptance and the KV-cache tier sizes come from the log because the server
@@ -69,8 +70,8 @@ server is visible rather than absent.
 | Speculative Decoding | per-draft acceptance as gauge and percent, accepted per round, verify round time vs GPU→CPU sync, `gate off` when the runtime disabled speculation |
 | Sampling | what the last request ran with: `temp 1.00 · p 0.95 k 20`, `max out 64000 · launch default`, `stream off`, `route responses` |
 | Server log | `feed live` / `--metrics off` / `unreachable` / `401 unauthorized`; totals since boot (`tokens`, `requests`, `messages`, `tool calls`); the log file, its size and last write |
-| Turn (opt-in) | the footer meter's numbers as rows |
-| Attach (opt-in) | the plugin's own integration failures; appears on its own whenever a host API refused |
+| Turn (opt-in) | the footer meter's numbers as rows, prefill bar included |
+| Attach | the plugin's own integration failures; appears on its own whenever a host API refused, and can also be listed in `sections` |
 
 ### One client or several
 
@@ -119,8 +120,14 @@ denominator.
 | sidebar hidden, turn running | `pollHz` (4/s) | never |
 | idle, nothing visible | never | never |
 
-The log tail reads only appended bytes, stops at the last complete line, and
-skips forward past a backlog larger than its read cap.
+"Nothing visible" is about this client: another client's requests do not start
+the fast poll while the panel is hidden and no turn of ours is running.
+
+The log tail reads only appended bytes and stops at the last complete line. A
+backlog larger than its read cap is skipped forward to the last 256 KB in one
+poll, and the skipped bytes are reported as `tail +N unread`. Lines read on the
+first poll, after a rotation or after such a skip are stamped with the file's
+mtime rather than the clock, so an old line is drawn with its age.
 
 ## Install
 
@@ -169,20 +176,42 @@ restart.
 ```
 
 - `metricsUrl` accepts a bare origin, `/metrics` or `/metrics.json`. `/props` and
-  `/v1/models` derive from its origin, the log path from its port.
+  `/v1/models` derive from the origin that answered, the log path from its port.
 - `metricsToken` is sent as `Authorization: Bearer …` (the server's `--api-key`).
-- `logPath` defaults to `~/.mlx-serve/logs/mlx-serve-<port>.log`. Set `"off"` for
+- `logPath` defaults to `~/.mlx-serve/logs/mlx-serve-<port>.log` for the port
+  that answered. Set `"off"` for
   a remote server or one started with `--log-file off`; the log, spec, sampling
   and cache-tier rows disappear.
 - `sections` is the list of sections to draw, in order. Unknown names are
   ignored; an empty list draws nothing; a malformed value falls back to the
-  default. Add `"turn"` or `"attach"` to opt those in.
+  default. Add `"turn"` or `"attach"` to opt those in; `attach` also appears by
+  itself whenever a host integration threw.
 - `sparkCells: 0` removes the sparkline; `barCells: 0` makes the prefill line a
   plain rate; `ratioCells: 0` draws percentages without gauges;
   `historyCells: 0` omits the footer's decode-rate sparkline.
 - `diskCacheGb` is the SSD tier cap in GiB (`--prefix-cache-disk`).
 - `wiredLimitGb` overrides the `iogpu.wired_limit_mb` sysctl.
 - `bytesPerToken` is only used when the server gives no token counts.
+
+### Port discovery
+
+Nothing on disk names the live port: there is no pidfile and no server config,
+only a log file per run and the process's own argv. So:
+
+- The log tail is only opened after `/metrics.json` has answered (200, or 503 for
+  a server with `--metrics` off), and it tails the port that answered. Until
+  then the Server log section reads `waiting for a server`.
+- With no `metricsUrl` set, the default is `127.0.0.1:11234`. If it does not
+  answer — or if a URL you did set does not answer — the plugin lists
+  `~/.mlx-serve/logs`, takes the three newest `mlx-serve-<port>.log` files and
+  asks each port's `/metrics.json` with a 300 ms timeout, adopting the first that
+  answers. Setting `metricsUrl` pins the feed: the probe only runs if that URL
+  never answers.
+- A link that stays down is re-probed every 30 seconds, so a server restarted on
+  another port is picked up without a plugin reload.
+- With no live feed, a candidate log file older than five minutes is treated as
+  `no log file`: the log directory keeps one file per past run, and a dead run's
+  last `[spec-stats]` line would otherwise read as current.
 
 ## Deploying elsewhere
 
@@ -209,6 +238,8 @@ hostnames in the code. It needs OpenCode 2 (CLI-plugin API with the
 | `rows.ts` | all wording: `footerLabel` and the panel sections |
 | `logtail.ts` | incremental read of the server log, with rewind on rotation |
 | `tracker.ts` | per-turn speed from streamed deltas and live gauges |
+| `discover.ts` | which port the live server is on, and whether a log file is too old to trust |
+| `schedule.ts` | when to poll: busy, wanted, and what is due |
 | `fixtures.ts` | captured payloads and log lines for the tests |
 | `probe-live.ts` | manual probe: `METRICS_URL=… PROBE_SECONDS=10 node probe-live.ts` |
 
@@ -225,9 +256,14 @@ and is not covered by the test run.
 
 - Prefill tok/s divides forwarded tokens by prefill time. Billed prompt tokens
   would overstate warm-cache prefill by `prompt / (prompt − cached)`.
-- Live rates are windowed and go `null` when the feed goes stale.
+- Live rates are windowed and go `null` when the feed goes stale, and so do the
+  momentary gauges (`running`, `waiting`, `prefilling`, `gpu`).
+- Live prefill tok/s divides by the time since `prefill_tokens_live` last read 0,
+  not by a fixed window: the gauge resets per request.
+- The `60s` sparkline draws an idle second as 0 and ends at now, so a tool pause
+  is a gap rather than a repeat of the last rate.
 - `[spec-stats]` is per request; the section shows the last completed request and
-  ages the line.
+  adds an `age` row once the line is more than 90 seconds old.
 - Counter resets (a server restart) clear the window history instead of producing
   a negative rate.
 - Totals in Server log are the server's own since-boot counters. `tool calls` is

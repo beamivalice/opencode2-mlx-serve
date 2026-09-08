@@ -6,7 +6,6 @@ export interface MetricsSample {
   readonly genLive: number
   readonly prefilling: boolean
   readonly running: boolean
-  readonly memoryMb?: number
   /**
    * `requests_running` as a COUNT. `gen_live` is a server-wide counter, so how
    * many clients are behind it decides whether a rate is this turn's or the
@@ -29,11 +28,10 @@ export interface SpeedValue {
   readonly prefillTps: number | null
   readonly genTokens: number
   readonly genTps: number | null
-  readonly ramGb: number | null
   readonly ttftMs: number | null
   readonly elapsedMs: number
+  /** The count came from streamed bytes, not from a `usage` payload. */
   readonly tokensEstimated: boolean
-  readonly metricsOk: boolean
 }
 
 export interface SpeedConfig {
@@ -52,6 +50,8 @@ const LIVE_MIN_DURATION_MS = 250
 const GEN_BURST_MERGE_MS = 1_000
 /** Gaps longer than this are tool / permission / queue idle, not decode. */
 const GEN_IDLE_MS = 4_000
+/** A run with no bytes and no gen/prefill samples for this long is over, whatever the host said. */
+const RUN_STALL_MS = 60_000
 const MAX_TRACKED_RUNS = 64
 
 interface TokenSample {
@@ -78,15 +78,11 @@ interface RunState {
   lastPrefillTps: number | null
   settledPrefillTokens: number | null
   settledGenTokens: number | null
-  lastGenAt: number | null
   lastGenTps: number | null
   runningCount: number
-  stepActiveMs: number
-  turnActiveMs: number
   turnGenTokens: number
   tokensEstimated: boolean
   metricsOk: boolean
-  ramGb: number | null
   frozen: SpeedValue | null
 }
 
@@ -149,25 +145,18 @@ function trimSamples<T extends { t: number }>(samples: T[], now: number, retainM
   while (samples.length > 2 && samples[0] && samples[0].t < cutoff) samples.shift()
 }
 
-function noteGen(st: RunState, now: number): void {
-  if (st.lastGenAt !== null) {
-    const gap = now - st.lastGenAt
-    if (gap > 0 && gap <= GEN_IDLE_MS) st.stepActiveMs += gap
-  }
-  st.lastGenAt = now
-}
-
 function bankStep(st: RunState, bytesPerToken: number): void {
-  st.turnActiveMs += st.stepActiveMs
   if (st.settledGenTokens !== null) st.turnGenTokens += st.settledGenTokens
-  else if (st.genBytes > 0) st.turnGenTokens += estimateTokens(st.genBytes, bytesPerToken)
-  st.stepActiveMs = 0
+  else if (st.genBytes > 0) {
+    st.turnGenTokens += estimateTokens(st.genBytes, bytesPerToken)
+    // Banked from bytes: the turn's total is a guess from here on.
+    st.tokensEstimated = true
+  }
   st.settledGenTokens = null
   st.genBytes = 0
   st.byteSamples = []
   st.genMetricSamples = []
   st.genLiveOrigin = null
-  st.lastGenAt = null
   st.firstTokenAt = null
   st.assistantMessageID = null
 }
@@ -177,8 +166,6 @@ export class SpeedTracker {
   /** Last forwarded prompt-token count per session, settled from `usage`. */
   private readonly lastForwarded = new Map<string, number>()
   private readonly config: SpeedConfig
-  metricsOk = false
-  ramGb: number | null = null
 
   constructor(config: SpeedConfig = DEFAULT_CONFIG) {
     this.config = config
@@ -238,15 +225,10 @@ export class SpeedTracker {
   }
 
   applyMetrics(sessionID: string, sample: MetricsSample): void {
-    this.metricsOk = true
-    if (sample.memoryMb !== undefined && Number.isFinite(sample.memoryMb) && sample.memoryMb > 0) {
-      this.ramGb = sample.memoryMb / 1024
-    }
     const st = this.runs.get(sessionID)
     if (!st || st.phase === "idle" || st.phase === "frozen") return
     st.metricsOk = true
     st.runningCount = sample.runningCount ?? (sample.running ? 1 : 0)
-    if (this.ramGb !== null) st.ramGb = this.ramGb
 
     if (st.genLiveOrigin === null) st.genLiveOrigin = sample.genLive
 
@@ -289,10 +271,6 @@ export class SpeedTracker {
       st.phase = "generate"
       st.firstTokenAt = st.firstTokenAt ?? sample.t
     }
-  }
-
-  markMetricsDown(): void {
-    this.metricsOk = false
   }
 
   finishStep(
@@ -348,7 +326,12 @@ export class SpeedTracker {
 
   hasActive(now = Date.now()): boolean {
     for (const st of this.runs.values()) {
-      if (st.phase === "prefill" || st.phase === "generate") return true
+      if (st.phase === "prefill" || st.phase === "generate") {
+        // The host can drop every terminal event for a session; without this the
+        // run stays "in flight" and the TUI polls at pollHz for the whole process.
+        if (now - lastActivityAt(st) < RUN_STALL_MS) return true
+        continue
+      }
       const last = st.byteSamples.at(-1)
       if (last && now < last.t + LIVE_STALE_MS) return true
     }
@@ -366,18 +349,17 @@ export class SpeedTracker {
 
     const genFromMetrics = st.genMetricSamples.at(-1)?.tokens
     const genFromBytes = estimateTokens(st.genBytes, this.config.bytesPerToken)
-    const stepTokens = st.settledGenTokens ?? genFromMetrics ?? genFromBytes
+    // `gen_live` counts every client, so while we share the server the count has
+    // to come from the same place as the rate: our own bytes.
+    const shared = st.runningCount > 1
+    const stepTokens = st.settledGenTokens ?? (shared ? genFromBytes : (genFromMetrics ?? genFromBytes))
     const genTokens = st.turnGenTokens + stepTokens
-    const tokensEstimated = st.settledGenTokens === null && st.turnGenTokens === 0
+    const tokensEstimated = st.tokensEstimated
 
     const metricTps = metricActiveRate(st.genMetricSamples, GEN_IDLE_MS)
     const byteTps = byteRate(st.byteSamples, now, this.config.bytesPerToken)
-    // `gen_live` counts every client. While another request is decoding
-    // alongside ours, its rate is the machine's, not this turn's — so prefer the
-    // per-session byte estimate, which only ever sees our own deltas. It is the
-    // less precise number and the more honest one; `tokensEstimated` already
-    // marks it with `~`.
-    const shared = st.runningCount > 1
+    // While another request decodes alongside ours the server-wide rate is the
+    // machine's, not this turn's, so the byte estimate is the honest number here.
     let genTps: number | null = null
     if (shared && byteTps !== null) {
       genTps = byteTps
@@ -404,11 +386,9 @@ export class SpeedTracker {
         prefillTps: null,
         genTokens: 0,
         genTps: null,
-        ramGb: st.ramGb ?? this.ramGb,
         ttftMs: null,
         elapsedMs,
         tokensEstimated: true,
-        metricsOk: st.metricsOk || this.metricsOk,
       }
     }
 
@@ -419,11 +399,9 @@ export class SpeedTracker {
       prefillTps,
       genTokens,
       genTps,
-      ramGb: st.ramGb ?? this.ramGb,
       ttftMs,
       elapsedMs,
       tokensEstimated,
-      metricsOk: st.metricsOk || this.metricsOk,
     }
   }
 
@@ -433,8 +411,19 @@ export class SpeedTracker {
       if (this.runs.size <= MAX_TRACKED_RUNS) return
       if (st.phase === "prefill" || st.phase === "generate") continue
       this.runs.delete(sessionID)
+      this.lastForwarded.delete(sessionID)
     }
   }
+}
+
+/** Newest evidence that this run is still moving: bytes, gen samples, prefill samples. */
+function lastActivityAt(st: RunState): number {
+  return Math.max(
+    st.startedAt,
+    st.byteSamples.at(-1)?.t ?? 0,
+    st.genMetricSamples.at(-1)?.t ?? 0,
+    st.prefillSamples.at(-1)?.t ?? 0,
+  )
 }
 
 function emptyRun(): RunState {
@@ -452,15 +441,11 @@ function emptyRun(): RunState {
     lastPrefillTps: null,
     settledPrefillTokens: null,
     settledGenTokens: null,
-    lastGenAt: null,
     lastGenTps: null,
     runningCount: 0,
-    stepActiveMs: 0,
-    turnActiveMs: 0,
     turnGenTokens: 0,
     tokensEstimated: true,
     metricsOk: false,
-    ramGb: null,
     frozen: null,
   }
 }
@@ -475,7 +460,6 @@ export interface MetricsJson {
     generation_tokens_live?: number
     requests_prefilling?: number
     requests_running?: number
-    memory_mb?: number
   }
 }
 
@@ -489,7 +473,6 @@ export function parseMetricsJson(json: MetricsJson, t = Date.now()): MetricsSamp
     prefilling: (Number(g.requests_prefilling) || 0) > 0,
     running: running > 0,
     runningCount: running,
-    memoryMb: Number(g.memory_mb) || 0,
   }
 }
 

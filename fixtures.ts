@@ -137,7 +137,7 @@ export const DFLASH_LINE =
   "  [spec-stats] mode=dflash attempts=90 accepts=201 avg_per_round=2.23 gate_min=1.50 per_draft_pct=74.4% block_size=4 partial_rounds=12 runtime_disabled=false table=128-256k:w1:22.73/390 table_drops=t1/c0/b0/i0 block_avg=3.10 block_hist=1:20,2:30 chooser_trials=4"
 
 export const CHAT_LINE =
-  "POST /v1/chat/completions (127 msgs, max_tokens=64000 (launch default), temp=1.00, top_p=0.95, top_k=20, stream=true, thinking=true, sys=18571b, user=760b, tools=13061b, tool_msgs=68)"
+  "POST /v1/chat/completions (127 msgs, max_tokens=64000 (launch default), temp=1.00, top_p=0.95, top_k=20, stream=true, thinking=true, sys=18571b, user=760b, tools=13061b, tool_msgs=68) "
 
 export const RESPONSES_LINE =
   "POST /v1/responses (3 msgs, max_out=4096, temp=0.70, stream=true, thinking=false, prev=null)"
@@ -164,3 +164,6 @@ export function feed(
 export const HOT_TIER_LINE = "  [hot-cache] resident=9481.06 / 28672.00 MB (1/1 entries)"
 export const SSD_TIER_LINE =
   "  [disk-cache] persisted 643681/643681 tokens (+1 chunks, 3 ssm-cp, 7.6 MB, 12ms); resident=10933.6 MB (12 entries)"
+/** A partial persist with no ssm-cp copies: the same line, a different parenthetical. */
+export const SSD_PARTIAL_LINE =
+  "  [disk-cache] persisted 322560/524241 tokens (+1 chunks, 0 ssm-cp, 12.8 MB, 67ms); resident=38009.6 MB (48 entries)"

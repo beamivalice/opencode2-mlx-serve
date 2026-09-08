@@ -15,6 +15,7 @@ import {
   parseFeed,
   parseModels,
   parseProps,
+  parseCacheTier,
   parseSampling,
   parseSpecStats,
   progressBar,
@@ -35,6 +36,8 @@ import {
   PLD_LINE,
   raw,
   RESPONSES_LINE,
+  SSD_PARTIAL_LINE,
+  SSD_TIER_LINE,
 } from "./fixtures.ts"
 
 
@@ -394,4 +397,70 @@ test("formatters keep narrow columns", () => {
   assert.equal(fmtBytes(700), "700B")
   assert.equal(fmtBytes(40 * 1024), "40K")
   assert.equal(fmtBytes(2 * 1024 ** 3), "2.0G")
+})
+
+// --- regressions -----------------------------------------------------------
+
+test("a prefill after a long idle is rated over the prefill, not the window", () => {
+  const t = new ServiceTracker()
+  // A minute of idle samples: prefill_tokens_live reads 0 per request.
+  for (let s = 0; s <= 60; s++) {
+    t.sample(feed({ gauges: { prefill_tokens_live: 0, requests_prefilling: 0, requests_running: 0 } }), s * 1_000)
+  }
+  t.sample(feed({ gauges: { prefill_tokens_live: 16_384, requests_prefilling: 1, requests_running: 1 } }), 62_000)
+  const s = t.statsAt(62_000)
+  assert.ok(s)
+  assert.equal(s.prefillTps, 8192, "16,384 tokens in the 2s the prefill took, not over a 30s window")
+})
+
+test("a gap in decode reads as zero, and the series ends at now", () => {
+  const t = new ServiceTracker()
+  const busy = (i: number, live: number) =>
+    t.sample(feed({ counters: { generation_tokens_total: live }, gauges: { generation_tokens_live: live, requests_running: 1 } }), i * 1_000)
+  for (let i = 1; i <= 5; i++) busy(i, 1_000 + i * 100) // 100 t/s
+  // A five-second tool pause: nothing is running, so nothing is binned.
+  for (let i = 6; i <= 10; i++) {
+    t.sample(feed({ counters: { generation_tokens_total: 1_500 }, gauges: { generation_tokens_live: 1_500, requests_running: 0 } }), i * 1_000)
+  }
+  for (let i = 11; i <= 15; i++) busy(i, 1_500 + (i - 10) * 20) // 20 t/s
+  const s = t.statsAt(15_000)
+  assert.ok(s)
+  assert.equal(s.genSeries.length, 15, "one point per second from the first bin to now")
+  assert.deepEqual(s.genSeries.slice(5, 10), [0, 0, 0, 0, 0], "the tool pause is a gap, not sustained decoding")
+  assert.ok((s.genSeries[4] ?? 0) > 90, "the busy seconds before it are still there")
+
+  const after = t.statsAt(20_000)
+  assert.ok(after)
+  assert.deepEqual(after.genSeries.slice(-5), [0, 0, 0, 0, 0], "five seconds after decode stopped the trace is flat")
+})
+
+test("a dead feed stops claiming work in flight", () => {
+  const t = new ServiceTracker()
+  t.sample(feed({ gauges: { requests_running: 1, requests_waiting: 2, requests_prefilling: 1, gpu_utilization_pct: 63 } }), 1_000)
+  const live = t.statsAt(1_000)
+  assert.equal(live?.running, 1)
+  const dead = t.statsAt(30_000)
+  assert.ok(dead)
+  assert.deepEqual(
+    [dead.running, dead.waiting, dead.prefilling, dead.gpuPct],
+    [0, 0, 0, 0],
+    "an unreachable feed must not draw `running 1` and `gpu 63%` under it",
+  )
+})
+
+test("the disk tier parses whatever the write parenthetical says", () => {
+  assert.deepEqual(parseCacheTier(SSD_TIER_LINE), { kind: "ssd", residentMb: 10933.6, capMb: null })
+  assert.deepEqual(
+    parseCacheTier(SSD_PARTIAL_LINE),
+    { kind: "ssd", residentMb: 38009.6, capMb: null },
+    "a partial persist with no ssm-cp copies is the same row",
+  )
+  assert.equal(parseCacheTier("  [disk-cache] e17 complete on disk: 865171 tokens, 845 chunks, 16 ssm-cp"), null, "not an occupancy line")
+})
+
+test("the request line parses with the trailing space the server writes", () => {
+  const s = parseSampling(CHAT_LINE)
+  assert.ok(CHAT_LINE.endsWith(") "), "captured verbatim, trailing space and all")
+  assert.equal(s?.toolMsgs, 68)
+  assert.equal(s?.stream, true)
 })

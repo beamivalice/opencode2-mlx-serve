@@ -16,7 +16,11 @@
  * being parsed as garbage, and cutting at a newline can never split a UTF-8
  * sequence. When the file shrinks or the inode changes we rewind (rotation, or a
  * fresh server on the same port), and a backlog larger than `chunkBytes` is
- * skipped forward rather than blocking the TUI.
+ * skipped forward to the last `backBytes` rather than crawled a chunk per poll.
+ *
+ * Lines read on the first poll, after a rewind or after a skip are stamped with
+ * the file's mtime, not with the clock: they were written before we looked, and
+ * the panel ages a row by that stamp.
  */
 
 import { closeSync, openSync, readSync, statSync } from "node:fs"
@@ -61,17 +65,13 @@ export interface LogStatus {
   readonly error: string | null
   /** Lines scanned on this poll. */
   readonly lines: number
-  /** Bytes passed over unread because the backlog exceeded `chunkBytes`. */
+  /** Bytes skipped unread because the backlog exceeded `chunkBytes`. */
   readonly dropped: number
 }
 
+/** What a poll saw. The values themselves are read back with `latestSpec()` and friends. */
 export interface LogRead {
   readonly status: LogStatus
-  readonly spec: Observed<SpecStats> | null
-  readonly sampling: Observed<SamplingStats> | null
-  /** RAM hot-cache tier and SSD tier, newest line of each. */
-  readonly hot: Observed<CacheTier> | null
-  readonly ssd: Observed<CacheTier> | null
 }
 
 export interface TailOptions {
@@ -149,6 +149,8 @@ export class LogTail {
 
     const first = this.offset === null
     let offset = this.offset as number
+    let historic = first
+    let dropped = 0
     if (first) {
       offset = Math.max(0, stat.size - this.backBytes)
       this.inode = stat.ino
@@ -156,13 +158,22 @@ export class LogTail {
       // Rotated to `<path>.1`, or a new server truncated the same file.
       offset = Math.max(0, stat.size - this.backBytes)
       this.inode = stat.ino
+      historic = true
+    } else if (stat.size - offset > this.chunkBytes) {
+      // A backlog (the sidebar was hidden for a long session): jump to the tail
+      // instead of parsing megabytes of dead lines a chunk per poll. Only the
+      // newest line of each kind survives a catch-up anyway.
+      const target = Math.max(offset, stat.size - this.backBytes)
+      dropped = target - offset
+      offset = target
+      historic = true
     }
 
     const cap = Math.min(stat.size, offset + this.chunkBytes)
     const wanted = cap - offset
     if (wanted <= 0) {
       this.offset = offset
-      return this.done({ bytes: stat.size, mtimeMs: stat.mtimeMs, error: null, lines: 0, dropped: 0 })
+      return this.done({ bytes: stat.size, mtimeMs: stat.mtimeMs, error: null, lines: 0, dropped })
     }
 
     let buffer: Buffer
@@ -183,38 +194,32 @@ export class LogTail {
     const lastNewline = buffer.lastIndexOf(NEWLINE)
     if (lastNewline < 0) {
       if (cap < stat.size) {
-        // No line ending in a full chunk: skip to the end rather than crawl
-        // megabytes per poll inside the TUI.
-        const dropped = stat.size - offset
+        // A single line longer than the whole chunk: walk past it.
         this.offset = stat.size
-        return this.done({ bytes: stat.size, mtimeMs: stat.mtimeMs, error: null, lines: 0, dropped })
+        return this.done({ bytes: stat.size, mtimeMs: stat.mtimeMs, error: null, lines: 0, dropped: dropped + stat.size - offset })
       }
       this.offset = offset
-      return this.done({ bytes: stat.size, mtimeMs: stat.mtimeMs, error: null, lines: 0, dropped: 0 })
+      return this.done({ bytes: stat.size, mtimeMs: stat.mtimeMs, error: null, lines: 0, dropped })
     }
 
     const consumed = lastNewline + 1
     const text = buffer.subarray(0, consumed).toString("utf8")
     this.offset = offset + consumed
-    const lines = this.consume(text, now)
+    // Bytes that were already on disk when we attached were written before now.
+    const at = historic ? (stat.mtimeMs || now) : now
+    const lines = this.consume(text, at)
 
     return this.done({
       bytes: stat.size,
       mtimeMs: stat.mtimeMs,
       error: null,
       lines,
-      dropped: 0,
+      dropped,
     })
   }
 
   private done(part: Stat): LogRead {
-    return {
-      status: { path: this.path, name: basename(this.path), ...part },
-      spec: this.spec,
-      sampling: this.sampling,
-      hot: this.hot,
-      ssd: this.ssd,
-    }
+    return { status: { path: this.path, name: basename(this.path), ...part } }
   }
 
   /** Scans freshly completed lines; the newest line of each kind wins. */
@@ -230,7 +235,7 @@ export class LogTail {
       if (line.includes("[spec-stats]")) {
         const parsed = parseSpecStats(line)
         if (parsed) spec = parsed
-      } else if (line.startsWith("POST /v1/")) {
+      } else if (line.trimStart().startsWith("POST /v1/")) {
         const parsed = parseSampling(line)
         if (parsed) sampling = parsed
       } else if (line.includes("[hot-cache] resident=") || line.includes("[disk-cache] persisted ")) {

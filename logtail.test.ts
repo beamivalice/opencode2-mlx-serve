@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { appendFileSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { LogTail, defaultLogPath, portFromUrl } from "./logtail.ts"
@@ -47,15 +47,16 @@ test("the first poll back-reads the tail and marks it historic", () => {
   const dir = workspace("backread")
   try {
     writeFileSync(join(dir, "mlx-serve-11234.log"), `boot noise\n${CHAT}\n${MTP}\n`)
-    const read = tail(dir).poll(1_000)
+    const t = tail(dir)
+    const read = t.poll(1_000)
     assert.equal(read.status.error, null)
     assert.ok((read.status.bytes ?? 0) > MTP.length)
-    assert.ok(read.spec, "the newest spec line is the one that describes the server")
-    assert.equal(read.spec?.value.mode, "mtp")
-    assert.equal(read.spec?.value.perDraftPct, 67.7)
-    assert.equal(read.spec?.at, 1_000, "a value is stamped with the poll clock that read it")
-    assert.equal(read.sampling?.value.temperature, 1)
-    assert.equal(read.sampling?.value.messages, 127)
+    assert.ok(t.latestSpec(), "the newest spec line is the one that describes the server")
+    assert.equal(t.latestSpec()?.value.mode, "mtp")
+    assert.equal(t.latestSpec()?.value.perDraftPct, 67.7)
+    assert.equal(t.latestSpec()?.at, read.status.mtimeMs, "a back-read line is as old as the file, not as new as the poll")
+    assert.equal(t.latestSampling()?.value.temperature, 1)
+    assert.equal(t.latestSampling()?.value.messages, 127)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -71,10 +72,10 @@ test("appended lines advance the offset and read as fresh", () => {
     appendFileSync(file, `${GATED}\n${CHAT}\n`)
     const read = t.poll(2_000)
     assert.equal(read.status.lines, 2, "only the two new lines were scanned")
-    assert.equal(read.spec?.value.perDraftPct, 38.4, "the newer tally replaced it")
-    assert.equal(read.spec?.value.runtimeDisabled, true)
-    assert.equal(read.spec?.at, 2_000, "the newest line replaces it and is re-stamped")
-    assert.equal(read.sampling?.value.messages, 127)
+    assert.equal(t.latestSpec()?.value.perDraftPct, 38.4, "the newer tally replaced it")
+    assert.equal(t.latestSpec()?.value.runtimeDisabled, true)
+    assert.equal(t.latestSpec()?.at, 2_000, "the newest line replaces it and is re-stamped")
+    assert.equal(t.latestSampling()?.value.messages, 127)
     assert.equal(t.poll(3_000).status.lines, 0, "the second poll re-reads nothing")
   } finally {
     rmSync(dir, { recursive: true, force: true })
@@ -87,15 +88,15 @@ test("a line still being written is read again whole, not parsed in halves", () 
     const file = join(dir, "mlx-serve-11234.log")
     const t = tail(dir)
     writeFileSync(file, `${MTP}\n`)
-    assert.equal(t.poll(1_000).spec?.value.attempts, 168)
+    assert.equal((t.poll(1_000), t.latestSpec())?.value.attempts, 168)
 
     const half = CHAT.slice(0, 60)
     appendFileSync(file, half)
-    const held = t.poll(2_000)
-        assert.equal(held.spec?.value.attempts, 168, "the unfinished line cannot replace the last good one")
+    t.poll(2_000)
+    assert.equal(t.latestSpec()?.value.attempts, 168, "the unfinished line cannot replace the last good one")
 
     appendFileSync(file, `${CHAT.slice(60)}\n`)
-    assert.equal(t.poll(3_000).sampling?.value.topK, 20, "it parses once the newline lands")
+    assert.equal((t.poll(3_000), t.latestSampling())?.value.topK, 20, "it parses once the newline lands")
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -131,10 +132,10 @@ test("rotation and truncation rewind instead of reading past the end", () => {
     writeFileSync(file, `${GATED}\n`)
     const read = t.poll(2_000)
     assert.equal(read.status.error, null)
-    assert.equal(read.spec?.value.attempts, 55, "rewound to the new file's tail")
-    assert.equal(read.spec?.at, 2_000, "bytes re-read after a rewind are stamped anew")
+    assert.equal(t.latestSpec()?.value.attempts, 55, "rewound to the new file's tail")
+    assert.equal(t.latestSpec()?.at, read.status.mtimeMs, "bytes re-read after a rewind carry the file's own age")
     appendFileSync(file, `${MTP}\n`)
-    assert.equal(t.poll(3_000).spec?.value.attempts, 168)
+    assert.equal((t.poll(3_000), t.latestSpec())?.value.attempts, 168)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -147,31 +148,32 @@ test("a missing log file is a status line, not an exception", () => {
     const read = t.poll(1_000)
     assert.equal(read.status.bytes, null)
     assert.equal(read.status.error, "no log file", "--log-file off, or the server is remote")
-    assert.equal(read.spec, null)
+    assert.equal(t.latestSpec(), null)
     writeFileSync(join(dir, "mlx-serve-11234.log"), `${CHAT}\n`)
-    assert.equal(t.poll(2_000).sampling?.value.endpoint, "chat/completions", "it recovers on its own")
+    assert.equal((t.poll(2_000), t.latestSampling())?.value.endpoint, "chat/completions", "it recovers on its own")
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
 })
 
-test("a multi-line backlog drains a chunk at a time without losing lines", () => {
+test("a backlog bigger than the read cap is skipped forward, not crawled", () => {
   const dir = workspace("backlog")
   try {
     const file = join(dir, "mlx-serve-11234.log")
     writeFileSync(file, "")
-    const t = tail(dir, "mlx-serve-11234.log", { backBytes: 0, chunkBytes: 8192 })
+    const t = tail(dir, "mlx-serve-11234.log", { backBytes: 2048, chunkBytes: 8192 })
     assert.equal(t.poll(1_000).status.error, null, "an empty file is not an error")
 
     appendFileSync(file, `${"noise-".repeat(200)}\n`.repeat(8)) // ~9.6 KB, then the line we care about
     appendFileSync(file, `${GATED}\n`)
     const first = t.poll(2_000)
-    assert.equal(first.status.dropped, 0, "lines are not skipped just because the file grew")
-    assert.equal(first.spec, null, "this poll only got as far as the noise")
+    assert.ok(first.status.dropped > 7_000, `the backlog is walked past in one poll, saw ${first.status.dropped}`)
+    assert.equal(t.latestSpec()?.value.attempts, 55, "and the newest line is read on that same poll")
 
+    appendFileSync(file, `${MTP}\n`)
     const next = t.poll(3_000)
-    assert.equal(next.spec?.value.attempts, 55, "the next chunk reaches the spec line")
-    assert.equal(next.spec?.at, 3_000, "the spec line lands on the poll that drained it")
+    assert.equal(next.status.dropped, 0, "a small append is read normally")
+    assert.equal(t.latestSpec()?.value.attempts, 168)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -186,8 +188,8 @@ test("the newest line of each kind in a chunk wins", () => {
     t.poll(1_000)
     appendFileSync(file, `${MTP}\n${CHAT}\n${GATED}\n`)
     const read = t.poll(2_000)
-    assert.equal(read.spec?.value.attempts, 55, "not the first line in the chunk")
-    assert.equal(read.sampling?.value.messages, 127)
+    assert.equal(t.latestSpec()?.value.attempts, 55, "not the first line in the chunk")
+    assert.equal(t.latestSampling()?.value.messages, 127)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -202,9 +204,40 @@ test("a line longer than the read cap is skipped, not stuck", () => {
     t.poll(1_000)
     appendFileSync(file, `${"z".repeat(20_000)}\n`)
     const read = t.poll(2_000)
-    assert.ok(read.status.dropped >= 20_000, `one poll walks past the whole over-long line, saw ${read.status.dropped}`)
+    assert.ok(read.status.dropped >= 15_000, `one poll walks past the over-long line, saw ${read.status.dropped}`)
         appendFileSync(file, `${MTP}\n`)
-    assert.equal(t.poll(3_000).spec?.value.mode, "mtp", "and the tail keeps working after it")
+    assert.equal((t.poll(3_000), t.latestSpec())?.value.mode, "mtp", "and the tail keeps working after it")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a back-read of an old log is stamped old, so the panel can age it", () => {
+  const dir = workspace("aged")
+  try {
+    const file = join(dir, "mlx-serve-11234.log")
+    writeFileSync(file, `${MTP}\n`)
+    const long = Date.now() - 20 * 60_000
+    utimesSync(file, new Date(long), new Date(long))
+    const t = tail(dir)
+    t.poll(Date.now())
+    const spec = t.latestSpec()
+    assert.ok(spec)
+    assert.ok(Date.now() - spec.at > 19 * 60_000, "20 minutes old, and it says so")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("an indented request line still reaches the sampling parser", () => {
+  const dir = workspace("indented")
+  try {
+    const file = join(dir, "mlx-serve-11234.log")
+    const t = tail(dir)
+    writeFileSync(file, "")
+    t.poll(1_000)
+    appendFileSync(file, `  ${CHAT}\n`)
+    assert.equal((t.poll(2_000), t.latestSampling())?.value.topK, 20, "the parser trims, so the dispatch must too")
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

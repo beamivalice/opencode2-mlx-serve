@@ -74,3 +74,12 @@ test("originOf recovers the server root from the feed URL", () => {
   assert.equal(originOf("http://localhost/metrics.json"), "http://localhost")
   assert.equal(originOf("not a url"), null, "no origin means no /props, not a crash")
 })
+
+test("the options say whether the user pinned the log path", () => {
+  const auto = resolveOptions(undefined)
+  assert.equal(auto.logPathExplicit, false, "the tail follows whichever port answers")
+  const pinned = resolveOptions({ metricsUrl: "http://127.0.0.1:8098", logPath: "off" })
+  assert.equal(pinned.logPathExplicit, true)
+  assert.equal(pinned.logPath, null)
+  assert.equal(resolveOptions({ metricsUrl: "   " }).metricsUrl, DEFAULTS.metricsUrl, "whitespace is not a URL")
+})

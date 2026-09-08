@@ -27,7 +27,7 @@ import {
   type RawMetricsJson,
   type RawPropsJson,
 } from "./stats.ts"
-import { LogTail, type LogRead } from "./logtail.ts"
+import { LogTail, defaultLogPath, portFromUrl, type LogRead } from "./logtail.ts"
 import {
   buildSections,
   footerLabel,
@@ -36,7 +36,18 @@ import {
   type SidebarSection,
 } from "./rows.ts"
 import { originOf, resolveOptions, type ServeOptions } from "./options.ts"
+import {
+  PROBE_TIMEOUT_MS,
+  REPROBE_AFTER_MS,
+  answered,
+  candidatePorts,
+  logIsStale,
+  logsDir,
+  metricsUrlForPort,
+} from "./discover.ts"
+import { holdsServerBusy, isBusy, isDue, isWanted, metricsEveryMs } from "./schedule.ts"
 import { execFileSync } from "node:child_process"
+import { readdirSync, statSync } from "node:fs"
 
 // Do not import @opencode-ai/plugin at runtime: a v1 copy in
 // ~/.config/opencode/node_modules shadows the package OpenCode 2 bundles. The
@@ -61,7 +72,6 @@ type Ctx = {
   ui: {
     slot: (spec: Record<string, unknown>) => () => void
     toast: { show: (spec: { title?: string; message: string; variant?: string; duration?: number }) => void }
-    format?: { path: (path: string) => string }
   }
   theme: {
     text?: { subdued?: string; muted?: string; default?: string }
@@ -121,18 +131,15 @@ const definition = {
       }
     }
 
-    /** $HOME → ~, the way the rest of the TUI writes paths. */
-    function formatPath(path: string): string {
-      return attempt("ui.format.path", () => ctx.ui.format?.path(path) ?? path) ?? path
-    }
-
     // Only the newest plugin instance drives the UI: OpenCode reloads CLI
     // plugins on file change, and the old instance must not keep rendering.
     const guard = attempt("storage.memory(generation)", () =>
       ctx.storage.memory("generation", { initial: { active: 0 } }),
     ) as [{ active: number }, (fn: (d: { active: number }) => void) => void] | null
     const gen = guard?.[0] ?? { active: 0 }
-    const setGen = guard?.[1] ?? (() => {})
+    // With no store the local object is mutated instead, so the guard degrades to
+    // "always ours" rather than to "never ours", which would render nothing at all.
+    const setGen = guard?.[1] ?? ((fn: (d: { active: number }) => void) => fn(gen))
     const mine = Number(gen.active) + 1
     setGen((d) => {
       d.active = mine
@@ -141,7 +148,33 @@ const definition = {
 
     const tracker = new SpeedTracker({ bytesPerToken: options.bytesPerToken })
     const service = new ServiceTracker()
-    const tail = options.logPath === null ? null : new LogTail(options.logPath)
+    // The feed URL in force: the configured one until a probe adopts another port.
+    let feedUrl = options.metricsUrl
+    let tail: LogTail | null = null
+    let tailPath: string | null = null
+    let logStale = false
+
+    /**
+     * Tail the log of the port that answered, not of the port that was asked
+     * for: ~/.mlx-serve/logs keeps a file per run, and a dead one reads as
+     * current. An explicit `logPath` wins and never moves.
+     */
+    function ensureTail(url: string): void {
+      const path = options.logPathExplicit ? options.logPath : defaultLogPath(portFromUrl(url))
+      if (path === null) {
+        tail = null
+        tailPath = null
+        return
+      }
+      if (tailPath === path) return
+      tail = new LogTail(path)
+      tailPath = path
+      logRead = null
+      logStale = false
+      // Read it at once: the back-read is what fills the spec, sampling and
+      // cache-tier rows, and the next slow tick may be seconds away.
+      pollLog()
+    }
 
     const [version, setVersion] = createSignal(0)
     const [panelOnScreen, setPanelOnScreen] = createSignal(false)
@@ -188,6 +221,9 @@ const definition = {
     let lastProps = 0
     let lastModels = 0
     let lastLog = 0
+    /** When the feed first stopped answering; drives the port re-probe. */
+    let linkDownSince = 0
+    let probing = false
     let uiTimer: ReturnType<typeof setInterval> | undefined
     let reported = false
     const abort = new AbortController()
@@ -209,12 +245,75 @@ const definition = {
       return (err as { name?: string } | undefined)?.name === "AbortError"
     }
 
-    async function get(url: string): Promise<{ ok: boolean; status: number; body: unknown }> {
+    function authHeaders(): Record<string, string> {
       const headers: Record<string, string> = { Accept: "application/json" }
       if (options.metricsToken) headers.Authorization = `Bearer ${options.metricsToken}`
-      const res = await fetch(url, { headers, signal: abort.signal })
+      return headers
+    }
+
+    async function get(url: string, timeoutMs = 2_000): Promise<{ ok: boolean; status: number; body: unknown }> {
+      // A socket that is accepted and never answered would otherwise hold the
+      // in-flight flag open and block every later poll.
+      const signal = AbortSignal.any([abort.signal, AbortSignal.timeout(timeoutMs)])
+      const res = await fetch(url, { headers: authHeaders(), signal })
       if (!res.ok) return { ok: false, status: res.status, body: null }
       return { ok: true, status: res.status, body: await res.json() }
+    }
+
+    /**
+     * Which port is the live mlx-serve. Nothing on disk names it, so the newest
+     * log files' ports are asked in turn and the first that answers is adopted;
+     * 503 counts, because that is a server with --metrics off.
+     */
+    async function probeForFeed(): Promise<void> {
+      if (probing) return
+      probing = true
+      try {
+        const dir = logsDir()
+        let files: { name: string; mtimeMs: number }[]
+        try {
+          files = readdirSync(dir).map((name) => {
+            try {
+              return { name, mtimeMs: statSync(`${dir}/${name}`).mtimeMs }
+            } catch {
+              return { name, mtimeMs: 0 }
+            }
+          })
+        } catch {
+          return // no log directory: nothing to guess from
+        }
+        for (const port of candidatePorts(files)) {
+          const url = metricsUrlForPort(port)
+          if (url === feedUrl) continue
+          let status = 0
+          try {
+            const res = await fetch(url, {
+              headers: authHeaders(),
+              signal: AbortSignal.any([abort.signal, AbortSignal.timeout(PROBE_TIMEOUT_MS)]),
+            })
+            status = res.status
+          } catch {
+            continue
+          }
+          if (!answered(status)) continue
+          feedUrl = url
+          ensureTail(url)
+          lastMetrics = 0
+          lastProps = 0
+          lastModels = 0
+          return
+        }
+      } finally {
+        probing = false
+      }
+    }
+
+    /** A link that stays down is a server that moved, or never was: look again. */
+    function noteLinkDown(now: number): void {
+      if (linkDownSince === 0 || now - linkDownSince >= REPROBE_AFTER_MS) {
+        linkDownSince = now
+        void probeForFeed()
+      }
     }
 
     /** Counters, gauges, histograms: most of the panel, and the turn meter's live feed. */
@@ -222,34 +321,48 @@ const definition = {
       if (metricsInFlight) return
       metricsInFlight = true
       lastMetrics = Date.now()
+      const url = feedUrl
       try {
-        const res = await get(options.metricsUrl)
+        const res = await get(url)
         const now = Date.now()
         let link: Link = "live"
         if (res.status === 503) link = "disabled"
         else if (!res.ok) link = res.status === 401 || res.status === 403 ? "unauthorized" : "down"
+        if (link === "live" || link === "disabled") {
+          // This port is the server, so this port's log is the one to tail.
+          linkDownSince = 0
+          ensureTail(url)
+        }
         if (link === "live") {
           service.sample(parseFeed(res.body as RawMetricsJson), now)
           const sample = parseMetricsJson(res.body as MetricsJson, now)
           for (const sessionID of activeSessions) tracker.applyMetrics(sessionID, sample)
           const stats = service.statsAt(now)
+          // The gauges are server-wide: another client's work is not a reason to
+          // keep polling four times a second with nothing of ours to draw.
+          const working = stats !== null && (stats.running > 0 || stats.prefilling > 0 || stats.waiting > 0)
           serverBusyUntil =
-            stats !== null && (stats.running > 0 || stats.prefilling > 0 || stats.waiting > 0) ? now + 6_000 : now
+            working && holdsServerBusy(panelOnScreen(), tracker.hasActive(now)) ? now + 6_000 : now
         } else {
           service.noteLink(link)
           serverBusyUntil = now
+          // 401 is a server that is there with the wrong token; only "down" earns a port scan.
+          if (link === "down") noteLinkDown(now)
         }
       } catch (err) {
-        if (!aborted(err)) service.noteLink("down")
+        if (!aborted(err)) {
+          service.noteLink("down")
+          noteLinkDown(Date.now())
+        }
       } finally {
         metricsInFlight = false
       }
-      startUi()
+      if (instanceIsOurs()) startUi()
     }
 
     /** /props: memory headroom and the n-gram warm total. Slow-changing. */
     async function pollProps(): Promise<void> {
-      const origin = originOf(options.metricsUrl)
+      const origin = originOf(feedUrl)
       if (origin === null || propsInFlight) return
       propsInFlight = true
       lastProps = Date.now()
@@ -261,12 +374,12 @@ const definition = {
       } finally {
         propsInFlight = false
       }
-      startUi()
+      if (instanceIsOurs()) startUi()
     }
 
     /** /v1/models: which model, quantizer and speculative decoder are resident. */
     async function pollModels(): Promise<void> {
-      const origin = originOf(options.metricsUrl)
+      const origin = originOf(feedUrl)
       if (origin === null || modelsInFlight) return
       modelsInFlight = true
       lastModels = Date.now()
@@ -278,24 +391,30 @@ const definition = {
       } finally {
         modelsInFlight = false
       }
-      startUi()
+      if (instanceIsOurs()) startUi()
     }
 
     /** The log tail: acceptance and sampling. A missing file is a row, not a fault. */
     function pollLog(): void {
       if (tail === null) return
-      lastLog = Date.now()
+      const now = Date.now()
+      lastLog = now
       try {
-        logRead = tail.poll(Date.now())
+        logRead = tail.poll(now)
+        // With no live feed, a file nobody has written to in minutes belongs to
+        // one of the dead runs in the same directory. Its last [spec-stats] line
+        // would read as this server's, so the section says `no log file` instead.
+        logStale = logIsStale(logRead.status.mtimeMs, now, service.linkState() === "live")
       } catch {
         logRead = null
+        logStale = false
       }
     }
 
     // --- scheduling --------------------------------------------------------
 
     function busy(now: number): boolean {
-      return tracker.hasActive(now) || now < serverBusyUntil
+      return isBusy(tracker.hasActive(now), now, serverBusyUntil)
     }
 
     /**
@@ -303,8 +422,7 @@ const definition = {
      * while a turn runs; the slow reads only matter when the panel is on screen.
      */
     function wanted(now: number): boolean {
-      if (!instanceIsOurs()) return false
-      return panelOnScreen() || busy(now)
+      return isWanted(instanceIsOurs(), panelOnScreen(), busy(now))
     }
 
     function stopUi(): void {
@@ -333,13 +451,12 @@ const definition = {
       reportOnce()
 
       if (needed && !metricsInFlight) {
-        const everyMs = 1000 / (running ? options.pollHz : options.idlePollHz)
-        if (now - lastMetrics >= everyMs) void pollMetrics()
+        if (isDue(now, lastMetrics, metricsEveryMs(running, options.pollHz, options.idlePollHz))) void pollMetrics()
       }
       if (needed && panelOnScreen()) {
-        if (!propsInFlight && now - lastProps >= options.propsSeconds * 1000) void pollProps()
-        if (!modelsInFlight && now - lastModels >= options.modelsSeconds * 1000) void pollModels()
-        if (now - lastLog >= options.logSeconds * 1000) pollLog()
+        if (!propsInFlight && isDue(now, lastProps, options.propsSeconds * 1000)) void pollProps()
+        if (!modelsInFlight && isDue(now, lastModels, options.modelsSeconds * 1000)) void pollModels()
+        if (isDue(now, lastLog, options.logSeconds * 1000)) pollLog()
       }
     }
 
@@ -412,6 +529,8 @@ const definition = {
       const sid = sessionIDOf(e)
       tracker.finish(sid, createdAt(e))
       activeSessions.delete(sid)
+      // The footer now draws the frozen value, which carries no series.
+      history.delete(sid)
       if (lastSession === sid) lastSession = null
       serverBusyUntil = 0
       startUi()
@@ -481,23 +600,25 @@ const definition = {
 
     function panelInput(sessionID?: string): PanelInput {
       const now = Date.now()
+      const status = logRead?.status ?? null
       return {
         speed: speedFor(sessionID),
         service: service.statsAt(now),
         model,
-        spec: tail?.latestSpec() ?? null,
-        sampling: tail?.latestSampling() ?? null,
-        hot: tail?.latestHot() ?? null,
-        ssd: tail?.latestSsd() ?? null,
+        // A stale file publishes nothing: not its rows, not its numbers.
+        spec: logStale ? null : (tail?.latestSpec() ?? null),
+        sampling: logStale ? null : (tail?.latestSampling() ?? null),
+        hot: logStale ? null : (tail?.latestHot() ?? null),
+        ssd: logStale ? null : (tail?.latestSsd() ?? null),
         diskCacheGb: options.diskCacheGb,
-        log: logRead?.status ?? null,
+        logDisabled: options.logPathExplicit && options.logPath === null,
+        log: status !== null && logStale ? { ...status, bytes: null, mtimeMs: null, error: "no log file" } : status,
         sparkCells: options.sparkCells,
         barCells: options.barCells,
         now,
         link: service.linkState(),
         wiredLimitGb: wiredGb,
         ratioCells: options.ratioCells,
-        formatPath,
         attachErrors,
       }
     }
@@ -592,10 +713,11 @@ const definition = {
       if (unslot !== null) unslots.push(unslot)
     }
 
+    // No log is opened before a server answers: the tail follows the port that
+    // did, and until then there is nothing to say which file is this run's.
     void pollMetrics()
     void pollProps()
     void pollModels()
-    pollLog()
     startUi()
     reportOnce()
 

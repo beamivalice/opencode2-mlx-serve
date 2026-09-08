@@ -185,11 +185,9 @@ test("the footer line is turn stats, and holds no memory figure", () => {
       prefillTps: null,
       genTokens: 0,
       genTps: null,
-      ramGb: null,
       ttftMs: null,
       elapsedMs: 4_200,
       tokensEstimated: true,
-      metricsOk: false,
     }),
     "prefill 4.2s",
   )
@@ -202,11 +200,9 @@ test("the footer line is turn stats, and holds no memory figure", () => {
       prefillTps: 410.4,
       genTokens: 312,
       genTps: 51.4,
-      ramGb: 76.58,
       ttftMs: 1_200,
       elapsedMs: 8_000,
       tokensEstimated: true,
-      metricsOk: true,
     }),
     "~312 tok · decode ~51.4 t/s · prefill 410 t/s",
   )
@@ -224,7 +220,6 @@ test("a second client decoding alongside us does not inflate our rate", () => {
     prefilling: false,
     running: true,
     runningCount,
-    memoryMb: 70_000,
   })
   for (let i = 1; i <= 10; i++) {
     tracker.pushDelta("a", "x".repeat(48), i * 1000, "m1")
@@ -249,7 +244,6 @@ test("alone, the turn still uses the server's own token counter", () => {
       prefilling: false,
       running: true,
       runningCount: 1,
-      memoryMb: 70_000,
     })
   }
   const v = tracker.value("a", 6_000)
@@ -303,7 +297,6 @@ test("the footer prefill line becomes a progress bar against the last turn", () 
       prefilling: true,
       running: true,
       runningCount: 1,
-      memoryMb: 70_000,
     })
   }
   const line = footerLabel(t.value("a", 7_600), { barCells: 18 })
@@ -317,9 +310,72 @@ test("no yardstick, no bar: the first prefill stays a rate line", () => {
   const t = new SpeedTracker()
   t.beginRun("a", 0)
   t.beginStep("a", "m1", 0)
-  t.applyMetrics("a", { t: 1_200, prefillLive: 8_192, genLive: 0, prefilling: true, running: true, runningCount: 1, memoryMb: 70_000 })
+  t.applyMetrics("a", { t: 1_200, prefillLive: 8_192, genLive: 0, prefilling: true, running: true, runningCount: 1 })
   const line = footerLabel(t.value("a", 1_200), { barCells: 18 })
   assert.equal(line, "prefill 8,192 tok · 6827 t/s")
   assert.equal(progressBar(0.5, 6), "███░░░", "the bar primitive the footer draws with")
   assert.equal(footerLabel(t.value("a", 1_200), { barCells: 0 }), line, "barCells 0 draws the same facts as a saturated bar would")
+})
+
+test("with two clients the token count comes from our bytes too, not the machine's", () => {
+  const tracker = new SpeedTracker()
+  tracker.beginRun("a", 0)
+  tracker.beginStep("a", "m1", 0)
+  // The server counts 100 tok/s across both clients; we streamed 480 bytes.
+  for (let i = 1; i <= 10; i++) {
+    tracker.pushDelta("a", "x".repeat(48), i * 1000, "m1")
+    tracker.applyMetrics("a", {
+      t: i * 1000,
+      prefillLive: 0,
+      genLive: i * 100,
+      prefilling: false,
+      running: true,
+      runningCount: 2,
+    })
+  }
+  const v = tracker.value("a", 10_000)
+  assert.ok(v)
+  assert.ok(v.genTps !== null && v.genTps < 30, `expected our own rate, got ${v.genTps}`)
+  assert.ok(v.genTokens < 200, `the count must come from our bytes too, got ${v.genTokens}`)
+  assert.ok(v.genTokens > 50, `and it must still be our own ~101 tokens, got ${v.genTokens}`)
+})
+
+test("a byte-estimated count stays marked as an estimate after the turn ends", () => {
+  const t = new SpeedTracker()
+  t.beginRun("a", 0)
+  t.beginStep("a", "m1", 0)
+  for (let i = 1; i <= 10; i++) t.pushDelta("a", "x".repeat(48), i * 100, "m1")
+  assert.equal(t.value("a", 1_000)?.tokensEstimated, true)
+  t.finish("a", 1_000) // no usage ever arrived
+  const frozen = t.value("a", 1_100)
+  assert.ok(frozen)
+  assert.ok(frozen.genTokens > 0)
+  assert.equal(frozen.tokensEstimated, true, "no usage payload ever settled this count")
+})
+
+test("a settled step plus a live byte estimate is still an estimate", () => {
+  const t = new SpeedTracker()
+  t.beginRun("a", 0)
+  t.beginStep("a", "m1", 0)
+  t.finishStep("a", "m1", { input: 100, output: 500 }, 1_000)
+  assert.equal(t.value("a", 1_000)?.tokensEstimated, false, "settled from usage")
+  t.beginStep("a", "m2", 2_000)
+  for (let i = 1; i <= 10; i++) t.pushDelta("a", "x".repeat(48), 2_000 + i * 100, "m2")
+  const v = t.value("a", 3_000)
+  assert.ok(v)
+  assert.ok(v.genTokens > 500, "the settled step is banked under the live one")
+  assert.equal(v.tokensEstimated, true, "500 exact + ~100 guessed is a guess")
+})
+
+test("a run the host never ended stops counting as active", () => {
+  const t = new SpeedTracker()
+  t.beginRun("a", 0)
+  t.beginStep("a", "m1", 0)
+  t.pushDelta("a", "hello", 1_000, "m1")
+  assert.equal(t.hasActive(2_000), true)
+  assert.equal(t.hasActive(50_000), true, "a quiet minute is still the same turn")
+  assert.equal(t.hasActive(70_000), false, "no bytes and no metric samples for 60s: the turn is over")
+  t.applyMetrics("a", { t: 70_000, prefillLive: 0, genLive: 10, prefilling: false, running: true })
+  t.applyMetrics("a", { t: 71_000, prefillLive: 0, genLive: 110, prefilling: false, running: true })
+  assert.equal(t.hasActive(71_500), true, "a fresh gen sample revives it")
 })

@@ -268,8 +268,7 @@ function asBool(value: string | null): boolean | null {
 
 /** Parses `  [spec-stats] mode=mtp attempts=55 ...`; null for any other line. */
 export function parseSpecStats(line: string): SpecStats | null {
-  const at = line.indexOf(SPEC_MARKER)
-  if (at < 0) return null
+  if (!line.includes(SPEC_MARKER)) return null
   const mode = fieldValue(line, "mode")
   if (!mode) return null
   const attempts = asInt(fieldValue(line, "attempts")) ?? 0
@@ -501,7 +500,6 @@ const MAX_SAMPLES = 1_024
 /** A sample older than this says nothing about "now" — live rates go null. */
 const FRESH_MS = 6_000
 const GEN_WINDOW_MS = 4_000
-const PREFILL_WINDOW_MS = 30_000
 const REQ_WINDOW_MS = 60_000
 /** Shortest span a rate may be divided by; below this a poll artifact reads as throughput. */
 const MIN_WINDOW_MS = 250
@@ -540,17 +538,19 @@ function windowRate(
   return Number.isFinite(rate) && rate > 0 ? rate : null
 }
 
-/** One point per whole second for the last `points` seconds, oldest first. */
-function bucketSeries(bins: ReadonlyMap<number, number>, points: number): number[] {
+/**
+ * One point per whole second, ending at `nowSecond`, oldest first. A second with
+ * no bin is 0: the bins are only written while something runs, so a missing
+ * second is idle, and repeating the last rate would draw a tool pause as decode.
+ * Leading seconds before the oldest bin are left off rather than padded.
+ */
+function bucketSeries(bins: ReadonlyMap<number, number>, points: number, nowSecond: number): number[] {
   if (bins.size === 0) return []
-  let last = -Infinity
-  for (const key of bins.keys()) last = Math.max(last, key)
+  let first = Infinity
+  for (const key of bins.keys()) first = Math.min(first, key)
+  const start = Math.max(nowSecond - points + 1, first)
   const out: number[] = []
-  for (let i = points - 1; i >= 0; i--) {
-    const value = bins.get(last - i)
-    if (value !== undefined) out.push(value)
-    else if (out.length > 0) out.push(out[out.length - 1] as number)
-  }
+  for (let second = start; second <= nowSecond; second++) out.push(bins.get(second) ?? 0)
   return out
 }
 
@@ -584,12 +584,32 @@ function percent(part: number, whole: number): number | null {
   return Math.min(100, Math.round((part / whole) * 100))
 }
 
+/**
+ * Live prefill tok/s: forwarded tokens since the gauge last read 0, over the
+ * time since then. `prefill_tokens_live` resets per request, so a trailing
+ * window wider than the prefill divides by idle time and understates the rate.
+ */
+function prefillRate(base: Sample | null, last: Sample): number | null {
+  if (base === null) return null
+  const dtMs = last.t - base.t
+  if (dtMs < MIN_WINDOW_MS) return null
+  // A base that already carries tokens of THIS prefill is a real starting point;
+  // one left over from a previous request counts as zero.
+  const from = base.prefillLive > 0 && base.prefillLive <= last.prefillLive ? base.prefillLive : 0
+  const delta = last.prefillLive - from
+  if (!(delta > 0)) return null
+  const rate = delta / (dtMs / 1000)
+  return Number.isFinite(rate) && rate > 0 ? rate : null
+}
+
 export class ServiceTracker {
   private samples: Sample[] = []
   private latest: MetricsFeed | null = null
   private props: PropsSnapshot = EMPTY_PROPS
   private readonly genBins = new Map<number, number>()
   private link: Link = "unknown"
+  /** The sample the current prefill started from; see `prefillRate`. */
+  private prefillBase: Sample | null = null
 
   /** Called on every successful /metrics.json read. */
   sample(feed: MetricsFeed, now: number): void {
@@ -621,6 +641,13 @@ export class ServiceTracker {
     if (previous && (current.genTotal < previous.genTotal || current.requests < previous.requests)) {
       this.samples = []
       this.genBins.clear()
+      this.prefillBase = null
+    }
+    // Where the current prefill started: the newest sample with the gauge at 0,
+    // or the sample before it went backwards (a new request took the slot).
+    if (current.prefillLive <= 0) this.prefillBase = current
+    else if (this.prefillBase === null || (previous !== undefined && current.prefillLive < previous.prefillLive)) {
+      this.prefillBase = previous ?? current
     }
     this.samples.push(current)
     while (this.samples.length > 2 && current.t - (this.samples[0] as Sample).t > RETAIN_MS) this.samples.shift()
@@ -668,9 +695,7 @@ export class ServiceTracker {
 
     const genTps = fresh && last && last.running > 0 ? windowRate(samples, last, GEN_WINDOW_MS, (s) => s.genLive) : null
     const prefillTps =
-      fresh && last && last.prefilling > 0 && last.prefillLive > 0
-        ? windowRate(samples, last, PREFILL_WINDOW_MS, (s) => s.prefillLive)
-        : null
+      fresh && last && last.prefilling > 0 && last.prefillLive > 0 ? prefillRate(this.prefillBase, last) : null
     const reqPerSec = fresh && last ? windowRate(samples, last, REQ_WINDOW_MS, (s) => s.requests) : null
 
     const phase: ServerPhase = !fresh || !last
@@ -694,10 +719,12 @@ export class ServiceTracker {
       avgPrefillTps: ratio(feed.counters.prefillTokens, histSeconds(h.prefill_time_seconds)),
       avgGenTps: ratio(feed.counters.genTokens, histSeconds(h.decode_time_seconds)),
       reqPerSec,
-      running: last?.running ?? 0,
-      waiting: last?.waiting ?? 0,
-      prefilling: last?.prefilling ?? 0,
-      gpuPct: last?.gpuPct ?? feed.gauges.gpuPct,
+      // Momentary gauges, gated on freshness like the rates: a sample nobody has
+      // refreshed says nothing about what is in flight now.
+      running: fresh ? (last?.running ?? 0) : 0,
+      waiting: fresh ? (last?.waiting ?? 0) : 0,
+      prefilling: fresh ? (last?.prefilling ?? 0) : 0,
+      gpuPct: fresh ? (last?.gpuPct ?? feed.gauges.gpuPct) : 0,
       memGb: last && last.memMb > 0 ? last.memMb / 1024 : null,
       mlxActiveGb: toGb(last?.activeBytes ?? 0) || this.props.memory?.activeGb || null,
       mlxPoolGb: toGb(last?.poolBytes ?? 0) || this.props.memory?.poolGb || null,
@@ -713,7 +740,7 @@ export class ServiceTracker {
       aneLayers: feed.gauges.aneLayers,
       ngramBytes: feed.gauges.ngramBytes || this.props.ngramBytes,
       ngramProgress: this.props.ngramProgress,
-      genSeries: bucketSeries(this.genBins, SERIES_SECONDS),
+      genSeries: bucketSeries(this.genBins, SERIES_SECONDS, Math.floor(now / 1000)),
     }
   }
 }

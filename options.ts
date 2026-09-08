@@ -16,6 +16,8 @@ export const DEFAULT_SECTIONS: readonly SectionName[] = ALL_SECTIONS.filter((nam
 
 export interface ServeOptions {
   readonly metricsUrl: string
+  /** The user named `logPath` (a path, or "off"), so the tail does not follow the feed's port. */
+  readonly logPathExplicit: boolean
   readonly metricsToken: string
   readonly bytesPerToken: number
   /** UI re-render rate while something is moving. */
@@ -54,6 +56,7 @@ export interface ServeOptions {
 
 export const DEFAULTS: ServeOptions = {
   metricsUrl: "http://127.0.0.1:11234/metrics.json",
+  logPathExplicit: false,
   metricsToken: "mlx-serve",
   bytesPerToken: 4.75,
   refreshHz: 8,
@@ -105,6 +108,7 @@ export function resolveOptions(raw: Record<string, unknown> | undefined): ServeO
         : null
   return {
     metricsUrl,
+    logPathExplicit: src.logPath !== undefined,
     metricsToken: typeof src.metricsToken === "string" ? src.metricsToken : DEFAULTS.metricsToken,
     bytesPerToken: clamp(src.bytesPerToken, DEFAULTS.bytesPerToken, 1, 16),
     refreshHz: clamp(src.refreshHz, DEFAULTS.refreshHz, 1, 30),

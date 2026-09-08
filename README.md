@@ -122,6 +122,20 @@ denominator.
 The log tail reads only appended bytes, stops at the last complete line, and
 skips forward past a backlog larger than its read cap.
 
+## Install
+
+Requires OpenCode 2 with the CLI-plugin API and a Node that runs `.ts` files
+directly (22.6 or later). Clone into OpenCode's plugin directory and register
+it in `cli.json`:
+
+```sh
+git clone https://github.com/beamivalice/opencode2-mlx-serve.git ~/.config/opencode/plugins/mlx-serve
+```
+
+Start mlx-serve with `--metrics` (and `--api-key` if you set `metricsToken`).
+OpenCode reloads CLI plugins on file change, so edits take effect without a
+restart.
+
 ## Configuration
 
 `~/.config/opencode/cli.json`:
@@ -220,3 +234,7 @@ and is not covered by the test run.
   the `role == "tool"` message count of the last prompt, so it is per
   conversation.
 - mlx-serve publishes no uptime, so nothing here claims one.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

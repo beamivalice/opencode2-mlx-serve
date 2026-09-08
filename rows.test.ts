@@ -9,7 +9,6 @@ import {
   footerLabel,
   footerSpark,
   memoryGauge,
-  DIAGNOSTIC_SECTION,
   feedStatus,
   resolveSections,
   turnRows,
@@ -23,8 +22,8 @@ import type { SpeedValue } from "./tracker.ts"
 
 const NOW = 1_800_000_000_000
 
-function observed<T>(value: T, at = NOW, historic = false): Observed<T> {
-  return { value, at, historic }
+function observed<T>(value: T, at = NOW): Observed<T> {
+  return { value, at }
 }
 
 function logStatus(part: Partial<LogStatus> = {}): LogStatus {
@@ -35,7 +34,6 @@ function logStatus(part: Partial<LogStatus> = {}): LogStatus {
     mtimeMs: NOW - 1_500,
     error: null,
     lines: 4,
-    pending: 0,
     dropped: 0,
     ...part,
   }
@@ -91,7 +89,7 @@ const text = (rows: readonly SidebarRow[]) =>
 
 const render = (sec: { rows: readonly SidebarRow[] }) => text(sec.rows)
 
-const obs = <T,>(value: T) => ({ value, at: NOW, historic: false })
+const obs = <T,>(value: T) => ({ value, at: NOW })
 
 /** The Prefix cache section as the panel draws it, with the tiers it was handed. */
 const cacheRowsOf = (part: Partial<PanelInput>) =>
@@ -207,38 +205,45 @@ test("barCells 0 keeps the old two-line meter exactly", () => {
   assert.deepEqual(text(rows), ["prefill 4200 t/s · 128.0k tok"])
 })
 
-test("the footer's decode history is a histogram of the number beside it", () => {
-  assert.equal(footerSpark([24, 26, 25, 30, 22], 5), "\u2583\u2585\u2584\u2588\u2581", "min..max: the bumps are the point")
-  assert.equal(footerSpark([24, 26, 25, 30, 22], 5, false), "\u2587\u2587\u2587\u2588\u2586", "zero-based reads as one flat block")
-  assert.equal(footerSpark([30, 30, 30, 30], 4), "", "flat means nothing to see: a row of equal bars reads as a trend")
+test("the footer history is a zero-to-peak trace of the meter's own rate", () => {
+  assert.equal(footerSpark([24, 26, 25, 30, 22], 5), "▇▇▇█▆", "0..max: the scale the panel uses everywhere")
+  assert.equal(footerSpark([22, 30, 24, 26, 25], 5), "▆█▇▇▇")
+  assert.equal(footerSpark([30, 30, 30, 30], 4), "", "steady is flat, and flat draws nothing")
+  assert.equal(footerSpark([0, 0, 0], 3), "", "an all-zero series is not a baseline")
   assert.equal(footerSpark([1, 2], 0), "", "cells 0 omits the histogram")
   assert.equal(footerSpark([1], 8), "", "one point is not a history")
   assert.equal(footerSpark(null, 8), "")
-  assert.equal(footerSpark([0, 0, 0], 3), "", "an all-zero series draws nothing, not a baseline")
   assert.equal(footerSpark(Array.from({ length: 40 }, (_, k) => k), 6).length, 6, "a long history is cut to the cells asked for")
+  assert.equal(footerSpark.length, 2, "no third mode — the min..max scale was tried and read worse")
 })
-
 test("the footer line reads rate then its histogram", () => {
   const hist = { historyCells: 6, series: [20, 24, 28, 26, 30, 22] }
-  assert.equal(footerLabel(speed({ prefillTps: null }), hist), "1,400 tok \u00b7 decode 24.6 t/s \u2581\u2584\u2587\u2585\u2588\u2582 \u00b7 1m02s")
-  assert.equal(footerLabel(speed({ prefillTps: null })), "1,400 tok \u00b7 decode 24.6 t/s \u00b7 1m02s", "no series, no bars")
+  assert.equal(
+    footerLabel(speed({ prefillTps: null }), hist),
+    "1,400 tok · decode 24.6 t/s ▆▇█▇█▆ · 1m02s",
+  )
+  assert.equal(
+    footerLabel(speed({ prefillTps: null })),
+    "1,400 tok · decode 24.6 t/s · 1m02s",
+    "no series, no bars",
+  )
   assert.equal(
     footerLabel(speed({ prefillTps: null }), { historyCells: 6, series: [30, 30, 30] }),
-    "1,400 tok \u00b7 decode 24.6 t/s \u00b7 1m02s",
-    "steady is flat, and flat is not a story",
+    "1,400 tok · decode 24.6 t/s · 1m02s",
+    "a steady series is not a story",
   )
   assert.equal(
     footerLabel(speed({ elapsedMs: 20_000 }), hist),
-    "1,400 tok \u00b7 decode 24.6 t/s \u2581\u2584\u2587\u2585\u2588\u2582 \u00b7 prefill 4200 t/s",
+    "1,400 tok · decode 24.6 t/s ▆▇█▇█▆ · prefill 4200 t/s",
     "the histogram stays attached to the decode rate, ahead of the other clauses",
   )
-  // A rate that has not settled yet still shows its shape: the series is the
-  // history, and a stall in it is exactly what you want visible.
   assert.equal(
     footerLabel(speed({ genTps: null }), { historyCells: 4, series: [24, 20, 0, 0] }),
-    "1,400 tok \u00b7 decode \u2588\u2587\u2581\u2581 \u00b7 prefill 4200 t/s \u00b7 1m02s",
+    "1,400 tok · decode █▇▁▁ · prefill 4200 t/s · 1m02s",
+    "a rate that has not settled yet still shows its shape",
   )
 })
+
 test("one client in flight: throughput does not repeat the turn's rate", () => {
   const busy = new ServiceTracker()
   busy.sample(feed({ gauges: { generation_tokens_live: 1000, requests_running: 1 } }), NOW - 1_000)
@@ -250,6 +255,19 @@ test("one client in flight: throughput does not repeat the turn's rate", () => {
     ["turn", "throughput"],
   ).flatMap(render)
   assert.deepEqual(rows, ["decode 30.0 t/s · 1.4k tok", "decode avg 68.9 t/s · since boot"])
+})
+
+test("Throughput carries the admission rate the Queue section used to own", () => {
+  const busy = new ServiceTracker()
+  // Admissions are a counter over a 60s window, so the fixture has to move it.
+  for (let i = 0; i < 5; i++) {
+    busy.sample(
+      feed({ counters: { requests_success_total: 15 + i }, gauges: { generation_tokens_live: 1000 + i * 10, requests_running: 1 } }),
+      NOW - (4 - i) * 1_000,
+    )
+  }
+  const rows = section("throughput", input({ service: busy.statsAt(NOW) }))
+  assert.ok(rows.some((l) => /^admitted \d\.\d\d req\/s$/.test(l)), `expected an admitted line in ${rows.join(" / ")}`)
 })
 
 test("two clients in flight: both rates stay, and the turn's names the crowd", () => {
@@ -515,7 +533,7 @@ test("buildSections keeps the requested order and drops empty sections", () => {
 })
 
 test("every section has a title and every default section draws", () => {
-  assert.deepEqual([...ALL_SECTIONS, DIAGNOSTIC_SECTION], Object.keys(SECTION_TITLES))
+  assert.deepEqual([...ALL_SECTIONS, "attach"], Object.keys(SECTION_TITLES))
   const full = buildSections(input({ speed: speed() }), ALL_SECTIONS)
   assert.deepEqual(full.map((s) => s.title), [...ALL_SECTIONS].map((n) => SECTION_TITLES[n]))
   assert.equal(full.length, ALL_SECTIONS.length, `missing sections: ${ALL_SECTIONS.filter((n) => !full.some((s) => s.name === n)).join(",")}`)
@@ -524,7 +542,7 @@ test("every section has a title and every default section draws", () => {
 test("the KV cache tiers gauge themselves, without the entry count", () => {
   const hot = parseCacheTier(HOT_TIER_LINE)!
   const ssd = parseCacheTier(SSD_TIER_LINE)!
-  assert.deepEqual(hot, { kind: "hot", residentMb: 9481.06, capMb: 28672, entries: 1, maxEntries: 1, wroteMb: null, persistedTokens: null, totalTokens: null })
+  assert.deepEqual(hot, { kind: "hot", residentMb: 9481.06, capMb: 28672 }, "only the two numbers the row draws are captured")
   assert.equal(ssd.capMb, null, "the SSD cap is a launch flag; no log line carries it")
   const rows = cacheRowsOf({ hot: obs(hot), ssd: obs(ssd), diskCacheGb: 100, ratioCells: 8 })
   assert.deepEqual(rows, [

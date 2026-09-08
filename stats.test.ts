@@ -165,7 +165,6 @@ test("parseSpecStats reads an mtp round", () => {
   assert.equal(s.reason, "none")
   assert.equal(s.adaptive, "mtp")
   assert.deepEqual([s.syncMs, s.roundMs], [2.93, 47.31])
-  assert.equal(s.bucket, "128-256k", "the cost table bucket this request was billed against")
 })
 
 test("parseSpecStats reports the runtime gate going off, with its reason", () => {

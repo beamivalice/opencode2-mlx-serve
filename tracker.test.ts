@@ -2,7 +2,6 @@ import assert from "node:assert/strict"
 import { test } from "node:test"
 import {
   SpeedTracker,
-  TurnRateSeries,
   parseMetricsJson,
   resolveMetricsUrl,
 } from "./tracker.ts"
@@ -323,68 +322,4 @@ test("no yardstick, no bar: the first prefill stays a rate line", () => {
   assert.equal(line, "prefill 8,192 tok · 6827 t/s")
   assert.equal(progressBar(0.5, 6), "███░░░", "the bar primitive the footer draws with")
   assert.equal(footerLabel(t.value("a", 1_200), { barCells: 0 }), line, "barCells 0 draws the same facts as a saturated bar would")
-})
-
-test("the series reports each cell's own rate, so bumps stay bumps", () => {
-  const series = new TurnRateSeries(1, 12)
-  // A turn that decodes 30 tok/s, stalls for a second on a tool call, then spikes.
-  let tokens = 0
-  for (let sec = 0; sec < 20_000; sec += 250) {
-    const t = 1_000 + sec
-    const rate = sec < 10_000 ? 30 : sec < 12_500 ? 0 : 60
-    tokens += (rate * 250) / 1000
-    series.push(Math.round(tokens), t)
-  }
-  const values = [...series.values()]
-  assert.equal(values.length >= 10, true, `one point per closed second, saw ${values.length}`)
-  assert.equal(values[0], 30, "steady decode reads as its own rate once the arrival cell is past")
-  const dip = values.findIndex((v) => v < 1)
-  assert.ok(dip >= 0, "the stall is visible as a dip, not smoothed into a slope")
-  const peak = Math.max(...values)
-  assert.equal(peak >= 55, true, `the burst survives at ${peak} t/s`)
-  assert.ok(values[values.length - 1] > values[dip], "the series ends high after the burst")
-})
-
-test("a settled-usage correction is dropped, never drawn as a cliff", () => {
-  const series = new TurnRateSeries(1, 8)
-  series.push(100, 1_000)
-  series.push(130, 2_000) // 30 tok in cell 1
-  series.push(120, 3_000) // the estimate is corrected DOWN by settled usage
-  series.push(150, 4_000)
-  assert.deepEqual([...series.values()], [30], "the corrected cell is skipped; the clock keeps moving")
-  assert.equal(series.corrections, 1, "and the drop is counted, so the panel could say so")
-})
-
-test("the series caps its length and forgets on reset", () => {
-  const series = new TurnRateSeries(1, 4)
-  for (let sec = 1; sec <= 12; sec++) series.push(sec * 10, sec * 1000)
-  assert.equal(series.values().length, 4, "never longer than the cells it will be drawn in")
-  assert.deepEqual([...series.values()], [10, 10, 10, 10])
-  series.reset()
-  assert.deepEqual([...series.values()], [])
-  assert.equal(series.corrections, 0)
-  const lazy = new TurnRateSeries(2, 6)
-  lazy.push(0, 1_000) // opens cell 0
-  lazy.push(10, 2_000) // same cell: 8 Hz samples do not each become a point
-  lazy.push(20, 3_000) // closes cell 0: 20 tokens over 2s
-  lazy.push(24, 5_000) // closes cell 1: 14 tokens over 2s
-  assert.deepEqual([...lazy.values()], [7], "a 2-second cell divides by 2, mid-cell pushes are ignored")
-  const part = new TurnRateSeries(2, 6)
-  part.push(0, 1_000) // we arrive in the middle of a cell
-  part.push(10, 2_000)
-  part.push(30, 4_000)
-  assert.deepEqual([...part.values()], [10], "the arrival cell is passed over: 10 tokens in 2s, not 5")
-})
-
-test("garbage input cannot poison the series", () => {
-  const series = new TurnRateSeries(1, 4)
-  series.push(Number.NaN, 1_000)
-  series.push(10, Number.POSITIVE_INFINITY)
-  series.push(10, 2_000)
-  assert.deepEqual([...series.values()], [], "nothing credible in, nothing out")
-  const wide = new TurnRateSeries(0, 0)
-  wide.push(5, 1_000)
-  wide.push(9, 2_000) // leaves the arrival cell, which is measured but not drawn
-  wide.push(17, 3_000)
-  assert.deepEqual([...wide.values()], [8], "zero-second/zero-cell construction falls back to sane defaults")
 })

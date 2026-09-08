@@ -1,22 +1,16 @@
 /**
- * mlx-serve serving stats, read from the three surfaces the server already
- * publishes (it needs no cooperation from us, and nothing here is stored on the
- * server side):
+ * Parsing and math for what mlx-serve publishes:
  *
  *   GET /metrics.json   counters + gauges + histograms (needs --metrics)
- *   GET /props          memory headroom, n-gram warm progress, slots
- *   the server log      `[spec-stats]` acceptance and per-request sampling
- *                       params, which mlx-serve documents as a grep target
- *                       ("External tooling parses the `[spec-stats]` prefix;
- *                       keep the format stable" — generate.zig:logSpecStats)
+ *   GET /props          memory headroom, n-gram warm progress
+ *   GET /v1/models      resident model
+ *   the server log      `[spec-stats]`, per-request sampling, cache tier lines
+ *                       (generate.zig documents `[spec-stats]` as a stable format)
  *
- * Everything here is pure: no fetch, no DOM, no OpenTUI, so `node --test`
- * covers the math. `ServiceTracker` answers "what is the server doing now" the
- * way the web panel in mlx-serve/src/html/metrics.js does — rates over a
- * trailing window, averages from histogram sums, nothing carried forward by
- * hand. A stale sample yields `null`, not the last number we happened to see:
- * a sidebar that quietly keeps showing 24.6 t/s after the server died is worse
- * than an empty one.
+ * Pure: no fetch, no OpenTUI, so `node --test` covers it. `ServiceTracker`
+ * computes rates over a trailing window and averages from histogram sums, the
+ * same way mlx-serve's own web panel does. A stale sample yields `null`, not the
+ * last number seen.
  */
 
 import type { SpeedValue } from "./tracker.ts"
@@ -27,11 +21,7 @@ export type { SpeedValue }
 // /metrics.json shapes
 // ---------------------------------------------------------------------------
 
-/**
- * A Prometheus histogram, reduced to what is read: an observation count and a
- * sum. The bucket arrays existed for the latency percentiles, and the Latency
- * section is gone \u2014 the feed still sends them, they are just not held.
- */
+/** A Prometheus histogram reduced to what is used: observation count and sum. */
 export interface HistogramJson {
   readonly count: number
   readonly sum: number
@@ -109,7 +99,7 @@ function num(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0
 }
 
-export function parseHistogram(value: unknown): HistogramJson | null {
+function parseHistogram(value: unknown): HistogramJson | null {
   if (typeof value !== "object" || value === null) return null
   const raw = value as { count?: unknown; sum?: unknown }
   if (typeof raw.count !== "number" || !Number.isFinite(raw.count) || raw.count <= 0) return null
@@ -224,8 +214,6 @@ export interface SpecStats {
   readonly adaptive: string | null
   readonly syncMs: number | null
   readonly roundMs: number | null
-  /** Cost-table bucket this request was billed against, e.g. `128-256k`. */
-  readonly bucket: string | null
 }
 
 /** The `POST /v1/...` line mlx-serve logs per request at info level. */
@@ -249,7 +237,7 @@ export interface SamplingStats {
   readonly toolMsgs: number | null
 }
 
-export const SPEC_MARKER = "[spec-stats]"
+const SPEC_MARKER = "[spec-stats]"
 
 function fieldValue(line: string, key: string): string | null {
   const at = line.indexOf(`${key}=`)
@@ -285,7 +273,6 @@ export function parseSpecStats(line: string): SpecStats | null {
   const mode = fieldValue(line, "mode")
   if (!mode) return null
   const attempts = asInt(fieldValue(line, "attempts")) ?? 0
-  const table = fieldValue(line, "table")
   return {
     mode,
     attempts,
@@ -298,7 +285,7 @@ export function parseSpecStats(line: string): SpecStats | null {
     adaptive: fieldValue(line, "adaptive"),
     syncMs: asFloat(fieldValue(line, "sync_ms")),
     roundMs: asFloat(fieldValue(line, "round_ms")),
-    bucket: table ? table.split(":")[0] ?? null : null,
+
   }
 }
 
@@ -417,16 +404,12 @@ export interface CacheTier {
   /** Bytes held by the tier, in the megabytes the server prints (÷1024 → GiB). */
   readonly residentMb: number
   readonly capMb: number | null
-  readonly entries: number | null
-  readonly maxEntries: number | null
-  /** Only on a disk write: bytes and tokens this persist event moved to the SSD. */
-  readonly wroteMb: number | null
-  readonly persistedTokens: number | null
-  readonly totalTokens: number | null
 }
 
-const HOT_LINE = /\[hot-cache\] resident=([\d.]+)(?: \/ ([\d.]+))? MB \((\d+)\/(\d+) entries\)/
-const SSD_LINE = /\[disk-cache\] persisted (\d+)\/(\d+) tokens \((?:[^)]*?), ([\d.]+) MB, \d+ms\); resident=([\d.]+) MB \((\d+) entries\)/
+// The entry counts and per-write totals are matched past, not captured: nothing draws
+// them, and a capture group nobody reads is code that looks like data.
+const HOT_LINE = /\[hot-cache\] resident=([\d.]+)(?: \/ ([\d.]+))? MB \(\d+\/\d+ entries\)/
+const SSD_LINE = /\[disk-cache\] persisted \d+\/\d+ tokens \([^)]*?\); resident=([\d.]+) MB \(\d+ entries\)/
 
 function grp(m: RegExpExecArray | null, i: number): number | null {
   const v = m?.[i]
@@ -440,31 +423,12 @@ export function parseCacheTier(line: string): CacheTier | null {
   if (line.includes("[hot-cache] resident=")) {
     const m = HOT_LINE.exec(line)
     if (!m) return null
-    return {
-      kind: "hot",
-      residentMb: grp(m, 1) ?? 0,
-      capMb: grp(m, 2),
-      entries: grp(m, 3),
-      maxEntries: grp(m, 4),
-      wroteMb: null,
-      persistedTokens: null,
-      totalTokens: null,
-    }
+    return { kind: "hot", residentMb: grp(m, 1) ?? 0, capMb: grp(m, 2) }
   }
   if (line.includes("[disk-cache] persisted ")) {
     const m = SSD_LINE.exec(line)
     if (!m) return null
-    return {
-      kind: "ssd",
-      // 1-2 tokens, 3 bytes written this event, 4 bytes the tier holds, 5 entries.
-      residentMb: grp(m, 4) ?? 0,
-      capMb: null,
-      entries: grp(m, 5),
-      maxEntries: null,
-      wroteMb: grp(m, 3),
-      persistedTokens: grp(m, 1),
-      totalTokens: grp(m, 2),
-    }
+    return { kind: "ssd", residentMb: grp(m, 1) ?? 0, capMb: null }
   }
   return null
 }
@@ -541,7 +505,7 @@ const PREFILL_WINDOW_MS = 30_000
 const REQ_WINDOW_MS = 60_000
 /** Shortest span a rate may be divided by; below this a poll artifact reads as throughput. */
 const MIN_WINDOW_MS = 250
-export const SERIES_SECONDS = 60
+const SERIES_SECONDS = 60
 
 const GIB = 1024 ** 3
 
@@ -813,15 +777,9 @@ export function fmtDur(ms: number): string {
 }
 
 /**
- * The wired ceiling the memory gauge is drawn against.
- *
- * Only a **declared** limit counts. mlx-serve compares its working set against
- * Metal's `max_recommended_working_set_size`, which is a per-device value the
- * server reads and never publishes over HTTP, so guessing "75% of RAM" would put
- * a 90 GB footprint at 95% of a ceiling that does not exist — this machine has
- * `iogpu.wired_limit_mb = 120000`, roughly 117 GiB, set by its owner. With no
- * declared limit the row shows its bytes and no gauge, which is the honest
- * reading: `footprint 90.8G`.
+ * The wired ceiling the memory gauge is drawn against. Only a declared limit
+ * counts: mlx-serve compares against Metal's `max_recommended_working_set_size`,
+ * which it never publishes, so with no declared limit there is no gauge.
  */
 export function wiredCeilingGb(declaredGb: number | null): number | null {
   return declaredGb !== null && Number.isFinite(declaredGb) && declaredGb > 0 ? declaredGb : null
@@ -857,10 +815,8 @@ export function progressBar(fraction: number | null, cells: number): string {
 }
 
 /**
- * A LEVEL gauge: how far a quantity has eaten into a limit, `▮▮▮▮▮▮▮░░░`. Its own
- * glyph because it means something the other two do not: `█` progress fills
- * toward a total and moves with time, `▓` ratio is a share of whatever the whole
- * is, and `▮` is a reading against a ceiling you can be killed by.
+ * Level gauge, `▮▮▮▮▮▮▮░░░`: a quantity against its own limit. Distinct from the
+ * `█` progress bar, which fills toward a total over time.
  */
 export function levelBar(fraction: number | null, cells: number): string {
   if (cells <= 0) return ""

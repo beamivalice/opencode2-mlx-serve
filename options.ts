@@ -1,12 +1,7 @@
 /**
- * Plugin options and command-argument parsing — the decisions the plugin makes
- * before it talks to a server or a terminal.
- *
- * This lives apart from `tui.tsx` on purpose: that file is JSX the host
- * transpiles, so Node's test runner cannot import it, and the argument matching
- * below is exactly the code that silently broke `/speed` (the host's slash
- * matcher ignores commands that do not declare `arguments: true`). Pure and
- * tiny beats untestable and confident.
+ * Plugin options: defaults, clamping, and the derived log path. Kept apart from
+ * `tui.tsx` (JSX the host transpiles, which `node --test` cannot import) so it
+ * is testable.
  */
 
 import { resolveMetricsUrl } from "./tracker.ts"
@@ -14,10 +9,8 @@ import { defaultLogPath, portFromUrl } from "./logtail.ts"
 import { ALL_SECTIONS, resolveSections, type SectionName } from "./rows.ts"
 
 /**
- * What the sidebar draws by default. `turn` is left out: the speed meter lives in
- * the prompt footer, permanently, and repeating it above would be the same
- * measurement twice. Add `"turn"` to `sections` to get it back in the panel (the
- * Throughput section then folds itself away instead of duplicating the rate).
+ * Default sidebar sections. `turn` is left out because the footer meter already
+ * shows it; add `"turn"` to `sections` to draw it in the panel too.
  */
 export const DEFAULT_SECTIONS: readonly SectionName[] = ALL_SECTIONS.filter((name) => name !== "turn")
 
@@ -52,22 +45,11 @@ export interface ServeOptions {
    */
   readonly diskCacheGb: number | null
   /**
-   * The wired ceiling the memory gauge is drawn against, in GiB. Set this to
-   * `sysctl iogpu.wired_limit_mb / 1024` when it has been raised — mlx-serve
-   * reads the real Metal working-set size but does not publish it.
-   *
-   * null with no sysctl to read means NO gauge: the Memory section shows the
-   * footprint as bytes alone. Guessing 75% of RAM put a 92 GB footprint at 95% of
-   * a ceiling this machine's owner had already raised to ~117 GB.
+   * The wired ceiling the memory gauge is drawn against, in GiB. null means read
+   * `iogpu.wired_limit_mb` once; with no value from either source the Memory
+   * section shows the footprint as bytes and no gauge.
    */
   readonly wiredLimitGb: number | null
-  /**
-   * Scale the footer's decode histogram to its own min..max rather than 0..max.
-   * Default true: against a zero baseline a turn holding 22-30 t/s is a flat
-   * block, and the bumps are the only reason the series is drawn. The exact rate
-   * is printed in front of it, so the scale is never hidden.
-   */
-  readonly historyRelative: boolean
 }
 
 export const DEFAULTS: ServeOptions = {
@@ -86,7 +68,6 @@ export const DEFAULTS: ServeOptions = {
   barCells: 18,
   ratioCells: 8,
   historyCells: 14,
-  historyRelative: true,
   diskCacheGb: null,
   wiredLimitGb: null,
 }
@@ -133,16 +114,13 @@ export function resolveOptions(raw: Record<string, unknown> | undefined): ServeO
     modelsSeconds: clamp(src.modelsSeconds, DEFAULTS.modelsSeconds, 5, 3600),
     logSeconds: clamp(src.logSeconds, DEFAULTS.logSeconds, 1, 600),
     logPath,
-    // A malformed `sections` value falls back to this plugin's default, not to
-    // every section there is (which would put the turn meter back in the panel).
+    // A malformed `sections` value falls back to the default, not to every section.
     sections: resolveSections(src.sections, DEFAULT_SECTIONS),
     sparkCells: clamp(src.sparkCells, DEFAULTS.sparkCells, 0, 60),
     barCells: clamp(src.barCells, DEFAULTS.barCells, 0, 40),
     ratioCells: clamp(src.ratioCells, DEFAULTS.ratioCells, 0, 20),
     historyCells: clamp(src.historyCells, DEFAULTS.historyCells, 0, 60),
-    historyRelative: typeof src.historyRelative === "boolean" ? src.historyRelative : DEFAULTS.historyRelative,
-    // Only an explicit, sane number counts as a declaration; anything else leaves
-    // the gauge assuming the macOS default.
+    // Only an explicit, sane number counts; anything else means no gauge.
     diskCacheGb:
       typeof src.diskCacheGb === "number" && Number.isFinite(src.diskCacheGb) && src.diskCacheGb >= 0.5 && src.diskCacheGb <= 65536
         ? src.diskCacheGb

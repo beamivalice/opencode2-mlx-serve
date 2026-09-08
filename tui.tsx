@@ -1,29 +1,21 @@
 /** @jsxImportSource @opentui/solid */
 /**
- * mlx-serve serving stats in the OpenCode sidebar, with the turn speed meter in
- * the prompt footer.
- *
- * The layout is fixed, not a mode:
+ * mlx-serve stats in the OpenCode sidebar, plus the turn speed meter in the
+ * prompt footer.
  *
  *   footer   — turn stats, always on: `~456 tok · decode ~24.0 t/s`, and a
  *              progress bar while a prompt is being prefilled.
- *   sidebar  — server throughput, model, queue, latency, prefix cache, memory,
- *              MTP acceptance, last request's sampling, totals since boot, and
- *              the location of the server log.
+ *   sidebar  — server throughput, model, prefix cache, memory, MTP acceptance,
+ *              last request's sampling, totals since boot, server log.
  *
- * There are deliberately no slash commands: this OpenCode build does not dispatch
- * CLI-plugin commands into the prompt at all (`keymap.layer` accepts the spec, the
- * host lists none of our commands back), so a command here would be a promise this
- * build cannot keep. What used to be `/sidebar` and `/speed` is now either
- * always-on behaviour or a `cli.json` option (`sections`, `sparkCells`, `barCells`,
- * `logPath`).
+ * No slash commands: this OpenCode build does not dispatch CLI-plugin commands
+ * into the prompt, so everything is always-on or a `cli.json` option.
  *
- * All of it is read, never asked for: three GETs (/metrics.json, /props,
- * /v1/models) and one read-only tail of the log file mlx-serve already writes.
- * The server has no idea this panel exists, and no turn is slower for it.
+ * Read-only: three GETs (/metrics.json, /props, /v1/models) and a tail of the
+ * log file mlx-serve already writes.
  */
 import { createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js"
-import { parseMetricsJson, SpeedTracker, TurnRateSeries, type MetricsJson, type SpeedValue } from "./tracker.ts"
+import { parseMetricsJson, SpeedTracker, type MetricsJson, type SpeedValue } from "./tracker.ts"
 import {
   mbToGb,
   parseFeed,
@@ -89,17 +81,11 @@ const definition = {
     const options = resolveOptions(ctx.options)
 
     /**
-     * The wired ceiling the memory gauge is drawn against: an explicit
-     * `wiredLimitGb` option wins, otherwise the machine's declared
-     * `iogpu.wired_limit_mb`, read once — the same policy mlx-serve's own
-     * `wiredLimitBytes` uses, because a limit that moved under a live request
-     * would make the gauge lie mid-turn.
-     *
-     * Nothing else is trusted. Metal's real per-device working-set size is what
-     * the server actually compares against and it is never published, and guessing
-     * 75% of RAM would have drawn this machine's 90 GB footprint at 95% of a
-     * ceiling its owner raised to ~117 GB. A missing OID is normal (stock Mac,
-     * Linux, Windows), so this returns null quietly rather than reporting a fault.
+     * The wired ceiling the memory gauge is drawn against: `wiredLimitGb` if set,
+     * otherwise `iogpu.wired_limit_mb`, read once at load (mlx-serve reads its own
+     * limit once too). Metal's real working-set size is what the server compares
+     * against and it is never published, so nothing is guessed: a missing sysctl
+     * (stock Mac, Linux, Windows) yields null and the panel draws no gauge.
      */
     function declaredWiredGb(): number | null {
       if (options.wiredLimitGb !== null) return options.wiredLimitGb
@@ -140,8 +126,8 @@ const definition = {
       return attempt("ui.format.path", () => ctx.ui.format?.path(path) ?? path) ?? path
     }
 
-    // Only the newest plugin instance drives the UI. OpenCode reloads CLI
-    // plugins on file change, and two meters in one footer is nobody's idea.
+    // Only the newest plugin instance drives the UI: OpenCode reloads CLI
+    // plugins on file change, and the old instance must not keep rendering.
     const guard = attempt("storage.memory(generation)", () =>
       ctx.storage.memory("generation", { initial: { active: 0 } }),
     ) as [{ active: number }, (fn: (d: { active: number }) => void) => void] | null
@@ -166,38 +152,30 @@ const definition = {
     let lastSession: string | null = null
 
     /**
-     * This turn's decode rate, one point per second, sampled from the very number
-     * the footer prints — so the bars and the headline can never disagree. The
-     * server's own `gen_live` history would be the machine's rate, and with a
-     * second client decoding that series would not describe the `decode 30.4 t/s`
-     * written in front of it.
+     * Per-session decode-rate history for the footer sparkline: one point per
+     * second, taken from the same `genTps` the footer prints, so the bars and the
+     * headline agree even when another client is decoding. The rate is already
+     * windowed, so the trace is smooth by design.
      *
      * Written only from `tick`, never from a memo: a memo that writes a signal it
      * also reads re-triggers itself.
      */
-    const history = new Map<string, TurnRateSeries>()
-
-    /** One series per session, bounded like the meter it feeds. */
-    function seriesFor(sessionID: string): TurnRateSeries {
-      const existing = history.get(sessionID)
-      if (existing !== undefined) return existing
-      if (history.size > 64) {
-        const oldest = history.keys().next().value
-        if (oldest !== undefined) history.delete(oldest)
-      }
-      const created = new TurnRateSeries(1, options.historyCells)
-      history.set(sessionID, created)
-      return created
-    }
+    const history = new Map<string, number[]>()
+    let historySecond = 0
 
     function sampleHistory(sessionID: string | null, now: number): void {
       if (sessionID === null) return
+      const second = Math.floor(now / 1000)
+      if (second === historySecond) return
+      historySecond = second
       const value = tracker.value(sessionID, now)
-      if (value === null) return
-      // The CUMULATIVE token count goes in, not the rate: `genTps` is already a
-      // rate over a trailing window, and sampling that once a second averages
-      // away the very bumps the histogram exists to show.
-      seriesFor(sessionID).push(value.genTokens, now)
+      const rate = value?.genTps ?? null
+      if (rate === null) return
+      const points = history.get(sessionID) ?? []
+      points.push(rate)
+      // Keep a little more than the drawn window.
+      while (points.length > options.historyCells + 8) points.shift()
+      history.set(sessionID, points)
     }
 
     // Server busyness is cached instead of recomputed eight times a second: the
@@ -279,9 +257,7 @@ const definition = {
         const res = await get(`${origin}/props`)
         if (res.ok) service.noteProps(parseProps(res.body as RawPropsJson))
       } catch {
-        // /props is decoration on top of the metrics feed. A server without it, or
-        // behind a proxy that 404s it, must not make the header claim the whole
-        // server is unreachable — only /metrics.json gets to say that.
+        // Only /metrics.json decides the link state; a missing /props is not "down".
       } finally {
         propsInFlight = false
       }
@@ -540,9 +516,7 @@ const definition = {
       <text wrapMode="none" truncate>
         {props.label === "" ? null : <span style={{ fg: dim() }}>{props.label} </span>}
         <span style={{ fg: props.tone ? toneColor(props.tone) : bright() }}>{props.value}</span>
-        {/* A note can be a second statistic ("34.5M in · 49.8k out"), not only an
-            aside; drawing it dim makes it read as commentary on the number in
-            front of it. */}
+        {/* noteBright: the note is a second statistic, not an aside. */}
         {props.note ? <span style={{ fg: props.noteBright ? bright() : dim() }}> {props.note}</span> : null}
       </text>
     )
@@ -551,18 +525,16 @@ const definition = {
       <box>
         <text fg={bright()} wrapMode="none" truncate>
           <b>{props.section.title}</b>
-          {/* One colour for every gauge: the value colour. A heading that faded
-              to the theme's subdued tone read as a label, not a reading. */}
+          {/* Heading gauges use the value colour, same as row gauges. */}
           {props.section.note === undefined ? null : <span style={{ fg: bright() }}> {props.section.note}</span>}
         </text>
         <For each={props.section.rows}>{(row) => <Row label={row.label} value={row.value} note={row.note} tone={row.tone} noteBright={row.noteBright} />}</For>
       </box>
     )
 
-    /** The sidebar panel: header line, then each enabled section that has data. */
+    /** The sidebar panel: each enabled section that has data. */
     const SidebarPanel = (props: { sessionID?: string }) => {
-      // The poll schedule follows reality: we do the slow reads only while this
-      // component is actually mounted, and hide the sidebar to stop them.
+      // Slow reads run only while this component is mounted.
       createEffect(() => {
         setPanelOnScreen(true)
         onCleanup(() => setPanelOnScreen(false))
@@ -572,8 +544,6 @@ const definition = {
         version()
         return buildSections(panelInput(props.sessionID), options.sections)
       })
-      // No title line. The panel is named by what is in it, and "is the server
-      // answering" is a statistic, so it is a row in the Server log section now.
       return (
         <box gap={1}>
           <For each={sections()}>{(section) => <Block section={section} />}</For>
@@ -581,7 +551,7 @@ const definition = {
       )
     }
 
-    /** The turn meter: always at the bottom, whatever the sidebar is doing. */
+    /** The turn meter in the prompt footer. */
     const FooterMeter = (props: { sessionID?: string }) => {
       const label = createMemo(() => {
         version()
@@ -594,8 +564,7 @@ const definition = {
         return footerLabel(value, {
           barCells: options.barCells,
           historyCells: options.historyCells,
-          historyRelative: options.historyRelative,
-          series: props.sessionID == null ? null : seriesFor(props.sessionID).values(),
+          series: props.sessionID == null ? null : history.get(props.sessionID) ?? null,
         })
       })
       return (
@@ -606,8 +575,7 @@ const definition = {
     }
 
     const unslots: Array<() => void> = []
-    // `prepend` puts the serving stats above the host's own Context and MCP
-    // sections instead of burying them; the footer slot is where the meter was.
+    // `prepend` puts the stats above the host's own Context and MCP sections.
     const mounts: Array<{ spec: Record<string, unknown>; render: (input: { sessionID?: string }) => unknown }> = [
       {
         spec: { prepend: "sidebar.content" },

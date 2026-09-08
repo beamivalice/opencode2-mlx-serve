@@ -40,7 +40,7 @@ export interface SpeedConfig {
   readonly bytesPerToken: number
 }
 
-export const DEFAULT_CONFIG: SpeedConfig = {
+const DEFAULT_CONFIG: SpeedConfig = {
   bytesPerToken: 4.75,
 }
 
@@ -498,92 +498,4 @@ export function resolveMetricsUrl(raw: string): string {
   if (trimmed.endsWith("/metrics.json")) return trimmed
   if (trimmed.endsWith("/metrics")) return `${trimmed}.json`
   return `${trimmed}/metrics.json`
-}
-
-// ---------------------------------------------------------------------------
-// Per-bucket rate series (the footer's decode histogram)
-// ---------------------------------------------------------------------------
-
-/**
- * Turns a cumulative token count into a series of instantaneous rates, one point
- * per cell, so the bars keep their bumps.
- *
- * The tempting shortcut — sample the meter's own `genTps` once a second — averages
- * the picture flat: `genTps` is already a rate over a trailing window (bursts of
- * `gen_live`, or a 4-second byte window), so sampling it again compounds the
- * smoothing and a two-second stall becomes a gentle slope. This instead records the
- * cumulative count and divides the DELTA of each closed cell by the cell's length:
- * a tool call pausing decode shows as a trough, a wide MTP acceptance burst as a
- * spike, at the resolution the cell width allows.
- *
- * A cell whose counter went BACKWARDS is dropped, not drawn as zero. That is the
- * byte estimate being replaced by settled `usage` at the end of a step — a
- * correction, not a stall — and drawing it would put a false valley exactly where
- * the turn finished.
- */
-export class TurnRateSeries {
-  private readonly cells: number
-  private readonly secondsPerCell: number
-  private points: number[] = []
-  private bucket = -1
-  private base = 0
-  /** False until the cell we arrived in has been passed: see `push`. */
-  private armed = false
-  /** Cells discarded because the cumulative count moved backwards. */
-  corrections = 0
-
-  constructor(secondsPerCell = 1, cells = 24) {
-    this.secondsPerCell = secondsPerCell > 0 ? secondsPerCell : 1
-    this.cells = cells > 0 ? cells : 24
-  }
-
-  /** Feed the turn's cumulative generated-token count. */
-  push(tokens: number, now: number): void {
-    if (!Number.isFinite(tokens) || !Number.isFinite(now)) return
-    const bucket = Math.floor(now / (this.secondsPerCell * 1000))
-    if (this.bucket < 0) {
-      // The cell we arrive in is already partly spent: there is no way to know
-      // what the counter said when it opened, so it establishes the base and
-      // waits for the next cell to close.
-      this.bucket = bucket
-      this.base = tokens
-      return
-    }
-    if (bucket === this.bucket) return
-    // The cell we ATTACHED in is measured but never emitted: it opened before we
-    // started watching, so its delta covers part of a cell while being divided by
-    // the whole one — a rate that reads low for no reason but the clock. Passing
-    // it up costs one cell of history and removes a wrong point.
-    if (!this.armed) {
-      this.armed = true
-      this.bucket = bucket
-      this.base = tokens
-      return
-    }
-    // Measured from the base — the count when this cell's predecessor was
-    // entered — not from the largest count inside it: using the maximum throws
-    // away the growth that made that maximum, which is the whole cell's story.
-    const delta = tokens - this.base
-    if (delta < 0) {
-      this.corrections++
-    } else {
-      this.points.push(delta / this.secondsPerCell)
-      while (this.points.length > this.cells) this.points.shift()
-    }
-    this.bucket = bucket
-    this.base = tokens
-  }
-
-  /** Oldest first, at most `cells` points. */
-  values(): readonly number[] {
-    return this.points
-  }
-
-  reset(): void {
-    this.points = []
-    this.bucket = -1
-    this.base = 0
-    this.armed = false
-    this.corrections = 0
-  }
 }

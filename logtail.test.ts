@@ -53,7 +53,7 @@ test("the first poll back-reads the tail and marks it historic", () => {
     assert.ok(read.spec, "the newest spec line is the one that describes the server")
     assert.equal(read.spec?.value.mode, "mtp")
     assert.equal(read.spec?.value.perDraftPct, 67.7)
-    assert.equal(read.spec?.historic, true, "those bytes predate this TUI")
+    assert.equal(read.spec?.at, 1_000, "a value is stamped with the poll clock that read it")
     assert.equal(read.sampling?.value.temperature, 1)
     assert.equal(read.sampling?.value.messages, 127)
   } finally {
@@ -67,13 +67,13 @@ test("appended lines advance the offset and read as fresh", () => {
     const file = join(dir, "mlx-serve-11234.log")
     writeFileSync(file, `${MTP}\n`)
     const t = tail(dir)
-    assert.equal(t.poll(1_000).spec?.historic, true)
+    t.poll(1_000) // attach: the back-read consumes what is already there
     appendFileSync(file, `${GATED}\n${CHAT}\n`)
     const read = t.poll(2_000)
     assert.equal(read.status.lines, 2, "only the two new lines were scanned")
     assert.equal(read.spec?.value.perDraftPct, 38.4, "the newer tally replaced it")
     assert.equal(read.spec?.value.runtimeDisabled, true)
-    assert.equal(read.spec?.historic, false, "we watched this one land")
+    assert.equal(read.spec?.at, 2_000, "the newest line replaces it and is re-stamped")
     assert.equal(read.sampling?.value.messages, 127)
     assert.equal(t.poll(3_000).status.lines, 0, "the second poll re-reads nothing")
   } finally {
@@ -91,9 +91,8 @@ test("a line still being written is read again whole, not parsed in halves", () 
 
     const half = CHAT.slice(0, 60)
     appendFileSync(file, half)
-    const pending = t.poll(2_000)
-    assert.equal(pending.status.pending > 0, true, "bytes without a newline are held back")
-    assert.equal(pending.spec?.value.attempts, 168, "the unfinished line cannot replace the last good one")
+    const held = t.poll(2_000)
+        assert.equal(held.spec?.value.attempts, 168, "the unfinished line cannot replace the last good one")
 
     appendFileSync(file, `${CHAT.slice(60)}\n`)
     assert.equal(t.poll(3_000).sampling?.value.topK, 20, "it parses once the newline lands")
@@ -111,7 +110,7 @@ test("unicode survives a poll that stops mid-line", () => {
     t.poll(1_000)
     appendFileSync(file, "model said: 你好 🌍 — and kept going")
     const cut = t.poll(2_000)
-    assert.equal(cut.status.pending > 0, true)
+    assert.equal(cut.status.lines, 0, "half a line is not a line: nothing is scanned yet")
     appendFileSync(file, "\n")
     const done = t.poll(3_000)
     assert.equal(done.status.error, null)
@@ -133,7 +132,7 @@ test("rotation and truncation rewind instead of reading past the end", () => {
     const read = t.poll(2_000)
     assert.equal(read.status.error, null)
     assert.equal(read.spec?.value.attempts, 55, "rewound to the new file's tail")
-    assert.equal(read.spec?.historic, true, "bytes from before we looked again are not 'fresh'")
+    assert.equal(read.spec?.at, 2_000, "bytes re-read after a rewind are stamped anew")
     appendFileSync(file, `${MTP}\n`)
     assert.equal(t.poll(3_000).spec?.value.attempts, 168)
   } finally {
@@ -172,7 +171,7 @@ test("a multi-line backlog drains a chunk at a time without losing lines", () =>
 
     const next = t.poll(3_000)
     assert.equal(next.spec?.value.attempts, 55, "the next chunk reaches the spec line")
-    assert.equal(next.spec?.historic, false, "it landed while we were watching")
+    assert.equal(next.spec?.at, 3_000, "the spec line lands on the poll that drained it")
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -204,8 +203,7 @@ test("a line longer than the read cap is skipped, not stuck", () => {
     appendFileSync(file, `${"z".repeat(20_000)}\n`)
     const read = t.poll(2_000)
     assert.ok(read.status.dropped >= 20_000, `one poll walks past the whole over-long line, saw ${read.status.dropped}`)
-    assert.equal(read.status.pending, 0)
-    appendFileSync(file, `${MTP}\n`)
+        appendFileSync(file, `${MTP}\n`)
     assert.equal(t.poll(3_000).spec?.value.mode, "mtp", "and the tail keeps working after it")
   } finally {
     rmSync(dir, { recursive: true, force: true })

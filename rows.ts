@@ -147,9 +147,18 @@ export function feedStatus(link: Link | undefined): { value: string; tone: Tone 
  * What is loaded, how busy the GPU is, and the queue. Weight quantization is
  * left out (it describes the checkpoint, not the server); KV quantization is
  * kept because it sets the memory cost per token.
+ *
+ * `gpu` leads and is drawn whatever it reads: it is the one line here that moves
+ * every poll, and a line that comes and go pushes everything under it around.
+ * 0% is a reading — an idle GPU, and a feed that has gone quiet (its momentary
+ * gauges zero themselves), not a missing number.
  */
 function serverRows(model: ModelStats | null, service: ServiceStats | null | undefined, cells: number): SidebarRow[] {
   const rows: SidebarRow[] = []
+  if (service) {
+    const pct = Math.max(0, Math.min(100, service.gpuPct))
+    rows.push(row("gpu", `${gauge(pct / 100, cells)}${pct}%`))
+  }
   if (model) {
     rows.push(row("model", model.shortId))
     if (model.kvQuant !== null) rows.push(row("kv-quant", `${model.kvQuant}-bit`))
@@ -165,10 +174,6 @@ function serverRows(model: ModelStats | null, service: ServiceStats | null | und
       if (note !== undefined && 4 + which.length + note.length > 34) note = undefined
       rows.push(row("spec", which, note))
     }
-  }
-  if (service && service.gpuPct > 0) {
-    const pct = Math.max(0, Math.min(100, service.gpuPct))
-    rows.push(row("gpu", `${gauge(pct / 100, cells)}${pct}%`))
   }
   if (service) {
     const waiting = `${service.waiting} waiting`
@@ -352,8 +357,12 @@ function cacheRows(
   // with a gauge the row is already ~31 cells and the sidebar cuts the end.
   const tier = (name: string, t: CacheTier | null, capGb: number | null): SidebarRow | null => {
     if (t === null) return null
-    const used = mbToGb(t.residentMb)
-    if (used === null || used <= 0) return null
+    // A tier the log named holds its line even at zero: an empty cache is a
+    // reading, and a row that comes and goes moves everything under it. Only a
+    // corrupt number hides the row. `fmtGib` reads 0 GiB as "—".
+    const rawMb = t.residentMb
+    if (!Number.isFinite(rawMb) || rawMb < 0) return null
+    const used = rawMb / 1024
     if (capGb === null || cells <= 0) return row(name, fmtGib(used))
     const fraction = ratio(used, capGb) ?? 0
     return { label: name, value: `${gauge(fraction, cells)}${Math.round(fraction * 100)}%`, note: `· ${fmtGib(used)}/${fmtGib(capGb)}` }

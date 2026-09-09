@@ -411,13 +411,13 @@ function memoryRowsOf(s: ServiceStats): readonly SidebarRow[] {
   return buildSections(input({ service: s }), ["memory"])[0]?.rows ?? []
 }
 
-test("Server carries identity, the gpu bar, and the merged queue line", () => {
+test("Server leads with the gpu bar, then identity and the merged queue line", () => {
   assert.deepEqual(section("server"), [
+    "gpu 63%",
     "model Qwen3.8-Flash-Next",
     "kv-quant 8-bit",
     "context 1,048,576",
     "spec mtp head \u00b7 qwen4_exp",
-    "gpu 63%",
     "running 1 · 0 waiting",
   ])
 })
@@ -442,12 +442,13 @@ test("Server still names the model when nothing is running", () => {
   const idle = new ServiceTracker()
   idle.sample(feed({ gauges: { requests_running: 0, requests_waiting: 0, gpu_utilization_pct: 0 } }), NOW)
   assert.deepEqual(section("server", input({ service: idle.statsAt(NOW) })), [
+    "gpu 0%",
     "model Qwen3.8-Flash-Next",
     "kv-quant 8-bit",
     "context 1,048,576",
     "spec mtp head \u00b7 qwen4_exp",
     "running 0 · 0 waiting",
-  ], "gpu 0% draws no row: an idle GPU every second is not information")
+  ], "an idle GPU reads 0%, it does not take its line")
 })
 
 test("no model loaded: the queue line is still worth drawing", () => {
@@ -657,7 +658,8 @@ test("no cache tiers in the log means no tier rows", () => {
   assert.deepEqual(cacheRowsOf({ hot: obs(parseCacheTier("[hot-cache] resident=0.00 / 28672.00 MB (0/1 entries)")!), ratioCells: 8 }), [
     "tokens 62% · from cache",
     "requests 60% · had a hit",
-  ], "an empty tier draws nothing")
+    "hot ░░░░░░░░ 0% · —/28.0G",
+  ], "an empty tier holds its line at 0%")
 })
 
 

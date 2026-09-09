@@ -66,7 +66,7 @@ server is visible rather than absent.
 | Section | Rows |
 | --- | --- |
 | Throughput | `decode` and `prefill` tok/s, each on its own permanent line with its since-boot average behind it, a 60-second sparkline, admitted req/s |
-| Server | `model`, `kv-quant`, `context` (exact digits), `spec mtp head · <arch>`, a GPU gauge, `running N · M waiting` |
+| Server | `gpu` first and always (0% is a reading, not a missing number), then `model`, `kv-quant`, `context` (exact digits), `spec mtp head · <arch>`, `running N · M waiting` |
 | Prefix cache | share of billed prompt tokens restored from cache, share of requests with a hit, `hot` and `ssd` tiers gauged against their own caps |
 | Memory | heading gauge `Memory ▮▮▮▮▮▮▮░░░ 79% of 117G wired` when a ceiling is known, else a plain `footprint` row; MLX in-use vs pool, free RAM and peak, ANE bytes, n-gram table |
 | Speculative Decoding | per-draft acceptance as gauge and percent, accepted per round, verify round time vs GPU→CPU sync, `gate off` when the runtime disabled speculation |

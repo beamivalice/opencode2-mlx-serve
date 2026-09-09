@@ -388,7 +388,7 @@ test("cache rows read from the feed alone", () => {
 
 test("the queue has no section of its own any more", () => {
   assert.deepEqual(buildSections(input(), ["queue" as never]), [], "unknown names draw nothing, they do not fall back")
-  assert.equal(section("server").at(-1), "running 1 · 0 waiting")
+  assert.equal(section("server").find((l) => l.startsWith("running ")), "running 1 · 0 waiting")
 })
 
 test("memory rows carry the allocator split and the accelerator warm", () => {
@@ -411,14 +411,14 @@ function memoryRowsOf(s: ServiceStats): readonly SidebarRow[] {
   return buildSections(input({ service: s }), ["memory"])[0]?.rows ?? []
 }
 
-test("Server leads with the gpu bar, then identity and the merged queue line", () => {
+test("Server shows load, then the serving totals", () => {
   assert.deepEqual(section("server"), [
     "gpu 63%",
-    "model Qwen3.8-Flash-Next",
-    "kv-quant 8-bit",
-    "context 1,048,576",
-    "spec mtp head \u00b7 qwen4_exp",
     "running 1 · 0 waiting",
+    "tokens 347.3k in · 3.3k out",
+    "requests 15 ok · 0 cancelled",
+    "messages req 127",
+    "tool calls 68 · this session",
   ])
 })
 
@@ -428,14 +428,16 @@ test("Server stops reciting the model card", () => {
   assert.equal(lines.some((l) => /layers/.test(l)), false, "layer count never changes while it runs")
   assert.equal(lines.some((l) => /moe/.test(l)), false, "is_moe explains nothing about this turn")
   assert.ok(lines.every((l) => [...l].length <= 34), `every Server line must fit the sidebar: ${lines.filter((l) => [...l].length > 34).join(" / ")}`)
-  assert.ok(lines.includes("model Qwen3.8-Flash-Next"), "the architecture left the model row, not the panel")
-  assert.ok(lines.includes("context 1,048,576"), "exact count, the way the host writes its context meter")
+  assert.equal(lines.some((l) => l.startsWith("model ")), false, "the model card moved to Server log")
+  const log = section("log")
+  assert.ok(log.includes("model Qwen3.8-Flash-Next"), "the model row moved, it did not leave the panel")
+  assert.ok(log.includes("context 1,048,576"), "exact count, the way the host writes its context meter")
 })
 
 test("a third client waiting shows on the merged queue line", () => {
   const loaded = new ServiceTracker()
   loaded.sample(feed({ gauges: { requests_running: 2, requests_waiting: 3, requests_prefilling: 1 } }), NOW)
-  assert.equal(section("server", input({ service: loaded.statsAt(NOW) })).at(-1), "running 2 · 3 waiting · 1 prefilling")
+  assert.equal(section("server", input({ service: loaded.statsAt(NOW) })).find((l) => l.startsWith("running ")), "running 2 · 3 waiting · 1 prefilling")
 })
 
 test("Server still names the model when nothing is running", () => {
@@ -443,16 +445,23 @@ test("Server still names the model when nothing is running", () => {
   idle.sample(feed({ gauges: { requests_running: 0, requests_waiting: 0, gpu_utilization_pct: 0 } }), NOW)
   assert.deepEqual(section("server", input({ service: idle.statsAt(NOW) })), [
     "gpu 0%",
-    "model Qwen3.8-Flash-Next",
-    "kv-quant 8-bit",
-    "context 1,048,576",
-    "spec mtp head \u00b7 qwen4_exp",
     "running 0 · 0 waiting",
+    "tokens 347.3k in · 3.3k out",
+    "requests 15 ok · 0 cancelled",
+    "messages req 127",
+    "tool calls 68 · this session",
   ], "an idle GPU reads 0%, it does not take its line")
 })
 
-test("no model loaded: the queue line is still worth drawing", () => {
-  assert.deepEqual(section("server", input({ model: null })), ["gpu 63%", "running 1 · 0 waiting"])
+test("no model loaded: serving statistics draw without the card", () => {
+  assert.deepEqual(section("server", input({ model: null })), [
+    "gpu 63%",
+    "running 1 · 0 waiting",
+    "tokens 347.3k in · 3.3k out",
+    "requests 15 ok · 0 cancelled",
+    "messages req 127",
+    "tool calls 68 · this session",
+  ])
 })
 
 test("a declared wired limit puts the gauge on the Memory heading, not a row", () => {
@@ -555,46 +564,46 @@ function samplingRowsOf(s: Observed<SamplingStats> | null): readonly SidebarRow[
 test("log rows point at the file and its freshness", () => {
   assert.deepEqual(logRowsOf(logStatus()), [
     "feed live",
-    "tokens 347.3k in · 3.3k out",
-    "requests 15 ok · 0 cancelled",
-    "messages req 127",
-    "tool calls 68 · this session",
+    "model Qwen3.8-Flash-Next",
+    "kv-quant 8-bit",
+    "context 1,048,576",
+    "spec mtp head · qwen4_exp",
     "log mlx-serve-11234.log · 302K",
     "last write just now",
   ])
   assert.deepEqual(logRowsOf(logStatus({ error: "no log file", bytes: null, mtimeMs: null })), [
     "feed live",
-    "tokens 347.3k in · 3.3k out",
-    "requests 15 ok · 0 cancelled",
-    "messages req 127",
-    "tool calls 68 · this session",
+    "model Qwen3.8-Flash-Next",
+    "kv-quant 8-bit",
+    "context 1,048,576",
+    "spec mtp head · qwen4_exp",
     "log mlx-serve-11234.log · no log file",
   ], "the name still shows, so the user knows which file is missing")
   assert.deepEqual(logRowsOf(logStatus({ mtimeMs: NOW - 3_600_000 })), [
     "feed live",
-    "tokens 347.3k in · 3.3k out",
-    "requests 15 ok · 0 cancelled",
-    "messages req 127",
-    "tool calls 68 · this session",
+    "model Qwen3.8-Flash-Next",
+    "kv-quant 8-bit",
+    "context 1,048,576",
+    "spec mtp head · qwen4_exp",
     "log mlx-serve-11234.log · 302K",
     "last write 60m00s ago",
   ])
   assert.deepEqual(logRowsOf(logStatus({ dropped: 40 * 1024 })), [
     "feed live",
-    "tokens 347.3k in · 3.3k out",
-    "requests 15 ok · 0 cancelled",
-    "messages req 127",
-    "tool calls 68 · this session",
+    "model Qwen3.8-Flash-Next",
+    "kv-quant 8-bit",
+    "context 1,048,576",
+    "spec mtp head · qwen4_exp",
     "log mlx-serve-11234.log · 302K",
     "last write just now",
     "tail +40K · unread",
   ])
   assert.deepEqual(logRowsOf(null), [
     "feed live · log tail off",
-    "tokens 347.3k in · 3.3k out",
-    "requests 15 ok · 0 cancelled",
-    "messages req 127",
-    "tool calls 68 · this session",
+    "model Qwen3.8-Flash-Next",
+    "kv-quant 8-bit",
+    "context 1,048,576",
+    "spec mtp head · qwen4_exp",
     "log not tailed · logPath off",
   ], "the feed row answers for the whole section when there is no file to point at")
   assert.deepEqual(buildSections(input({ log: null, link: "down" }), ["log"])[0].rows[0], { label: "feed", value: "unreachable", tone: "error" }, "a dead server still shows, in red")
@@ -660,6 +669,28 @@ test("no cache tiers in the log means no tier rows", () => {
     "requests 60% · had a hit",
     "hot ░░░░░░░░ 0% · —/28.0G",
   ], "an empty tier holds its line at 0%")
+})
+
+test("zero cache hits read as 0%, not as missing rows", () => {
+  const cold = new ServiceTracker()
+  cold.sample(feed({ counters: { prefix_cache_hits_total: 0, prefix_cache_tokens_total: 0 } }), NOW)
+  assert.deepEqual(section("cache", input({ service: cold.statsAt(NOW)! })), [
+    "tokens 0% · from cache",
+    "requests 0% · had a hit",
+  ])
+  const fresh = new ServiceTracker()
+  fresh.sample(
+    feed({
+      counters: {
+        prefix_cache_queries_total: 0,
+        prefix_cache_hits_total: 0,
+        prefix_cache_tokens_total: 0,
+        prompt_tokens_total: 0,
+      },
+    }),
+    NOW,
+  )
+  assert.deepEqual(section("cache", input({ service: fresh.statsAt(NOW)! })), [], "no queries at all is no data, not a 0%")
 })
 
 

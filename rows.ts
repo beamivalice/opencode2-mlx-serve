@@ -144,43 +144,19 @@ export function feedStatus(link: Link | undefined): { value: string; tone: Tone 
 }
 
 /**
- * What is loaded, how busy the GPU is, and the queue. Weight quantization is
- * left out (it describes the checkpoint, not the server); KV quantization is
- * kept because it sets the memory cost per token.
- *
- * `gpu` leads and is drawn whatever it reads: it is the one line here that moves
- * every poll, and a line that comes and go pushes everything under it around.
- * 0% is a reading — an idle GPU, and a feed that has gone quiet (its momentary
- * gauges zero themselves), not a missing number.
+ * Live serving statistics: how busy the GPU is, what is in flight, and the
+ * counters since boot. The model card (what is loaded) lives in Server log;
+ * everything here moves while the server works, and no line here disappears.
  */
-function serverRows(model: ModelStats | null, service: ServiceStats | null | undefined, cells: number): SidebarRow[] {
-  const rows: SidebarRow[] = []
-  if (service) {
-    const pct = Math.max(0, Math.min(100, service.gpuPct))
-    rows.push(row("gpu", `${gauge(pct / 100, cells)}${pct}%`))
-  }
-  if (model) {
-    rows.push(row("model", model.shortId))
-    if (model.kvQuant !== null) rows.push(row("kv-quant", `${model.kvQuant}-bit`))
-    if (model.contextLength !== null) rows.push(row("context", fmtExact(model.contextLength)))
-    if (model.mtpLoaded || model.drafterLoaded) {
-      const which = model.mtpLoaded ? "mtp head" : "drafter"
-      // The architecture rides on this row, not `model`, so it cannot truncate
-      // the model name. Dropped when the row would overflow.
-      const notes = [model.mtpLoaded && model.drafterLoaded ? "+ drafter" : null, model.architecture].filter(
-        (n): n is string => n !== null,
-      )
-      let note = notes.length > 0 ? `· ${notes.join(" · ")}` : undefined
-      if (note !== undefined && 4 + which.length + note.length > 34) note = undefined
-      rows.push(row("spec", which, note))
-    }
-  }
-  if (service) {
-    const waiting = `${service.waiting} waiting`
-    const busy = service.prefilling > 0 ? ` · ${service.prefilling} prefilling` : ""
-    rows.push(row("running", `${service.running} · ${waiting}${busy}`))
-  }
-  return rows
+function serverRows(s: ServiceStats, sampling: SamplingStats | null, cells: number): SidebarRow[] {
+  const pct = Math.max(0, Math.min(100, s.gpuPct))
+  const waiting = `${s.waiting} waiting`
+  const busy = s.prefilling > 0 ? ` · ${s.prefilling} prefilling` : ""
+  return [
+    row("gpu", `${gauge(pct / 100, cells)}${pct}%`),
+    row("running", `${s.running} · ${waiting}${busy}`),
+    ...totalsRows(s, sampling),
+  ]
 }
 
 /**
@@ -481,7 +457,7 @@ function samplingRows(observed: Observed<SamplingStats> | null, now: number): Si
   return rows
 }
 
-/** Since-boot totals, drawn inside `Server log`. */
+/** Since-boot totals and the last request's shape, drawn inside `Server`. */
 function totalsRows(s: ServiceStats, sampling: SamplingStats | null): SidebarRow[] {
   const rows: SidebarRow[] = [
     // "in" and "out" are both statistics, so both take the value colour.
@@ -508,25 +484,51 @@ function totalsRows(s: ServiceStats, sampling: SamplingStats | null): SidebarRow
 }
 
 /**
- * The panel's last section: whether the server answers, the since-boot totals,
- * and which log file is tailed.
+ * What is loaded: the model card that used to lead Server. It describes the
+ * run rather than the work, so it sits with the feed and the log file in the
+ * section that says which server this panel is about. Weight quantization is
+ * left out (it describes the checkpoint, not the server); KV quantization is
+ * kept because it sets the memory cost per token.
+ */
+function identityRows(model: ModelStats | null): SidebarRow[] {
+  if (model === null) return []
+  const rows = [row("model", model.shortId)]
+  if (model.kvQuant !== null) rows.push(row("kv-quant", `${model.kvQuant}-bit`))
+  if (model.contextLength !== null) rows.push(row("context", fmtExact(model.contextLength)))
+  if (model.mtpLoaded || model.drafterLoaded) {
+    const which = model.mtpLoaded ? "mtp head" : "drafter"
+    // The architecture rides on this row, not `model`, so it cannot truncate
+    // the model name. Dropped when the row would overflow.
+    const notes = [model.mtpLoaded && model.drafterLoaded ? "+ drafter" : null, model.architecture].filter(
+      (n): n is string => n !== null,
+    )
+    let note = notes.length > 0 ? `· ${notes.join(" · ")}` : undefined
+    if (note !== undefined && 4 + which.length + note.length > 34) note = undefined
+    rows.push(row("spec", which, note))
+  }
+  return rows
+}
+
+/**
+ * The panel's last section: which server this is, whether it answers, and
+ * which log file is tailed.
  */
 function logRows(input: PanelInput): SidebarRow[] {
   const log = input.log
   const status = feedStatus(input.link)
   const head = row("feed", status.value, log === null && input.link === "live" ? "· log tail off" : undefined, status.tone)
-  const totals = input.service === null ? [] : totalsRows(input.service, input.sampling?.value ?? null)
+  const identity = identityRows(input.model)
   // No file: either the operator turned the tail off, or no server has answered
   // yet and there is nothing to say which of the log directory's files is this run's.
   if (!log) {
-    return [head, ...totals, row("log", "not tailed", input.logDisabled === false ? "· waiting for a server" : "· logPath off")]
+    return [head, ...identity, row("log", "not tailed", input.logDisabled === false ? "· waiting for a server" : "· logPath off")]
   }
 
   if (log.error !== null || log.bytes === null) {
-    return [head, ...totals, row("log", log.name, `· ${log.error ?? "unreadable"}`, "warn")]
+    return [head, ...identity, row("log", log.name, `· ${log.error ?? "unreadable"}`, "warn")]
   }
   const age = log.mtimeMs === null ? null : Math.max(0, input.now - log.mtimeMs)
-  const rows: SidebarRow[] = [head, ...totals, row("log", log.name, `· ${fmtBytes(log.bytes)}`)]
+  const rows: SidebarRow[] = [head, ...identity, row("log", log.name, `· ${fmtBytes(log.bytes)}`)]
   if (age !== null) rows.push(row("last write", age < 5_000 ? "just now" : `${fmtDur(age)} ago`))
   if (log.dropped > 0) rows.push(row("tail", `+${fmtBytes(log.dropped)}`, "· unread"))
   return rows
@@ -617,7 +619,7 @@ function rowsFor(name: SectionName, input: PanelInput): SidebarRow[] {
     case "throughput":
       return s === null ? [] : throughputRows(s, input.sparkCells, input.turnRates ?? new Map(), inflight)
     case "server":
-      return serverRows(input.model, input.service, input.ratioCells ?? 0)
+      return s === null ? [] : serverRows(s, input.sampling?.value ?? null, input.ratioCells ?? 0)
     case "cache":
       return s === null ? [] : cacheRows(s, input.hot?.value ?? null, input.ssd?.value ?? null, input.ratioCells ?? 0, input.diskCacheGb ?? null)
     case "memory":

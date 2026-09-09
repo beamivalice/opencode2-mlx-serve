@@ -579,8 +579,10 @@ function histSeconds(hist: HistogramJson | undefined): number | null {
   return hist.sum
 }
 
+// A zero numerator is 0%, not missing data: only a zero denominator, a
+// negative part, or a non-number hides the row.
 function percent(part: number, whole: number): number | null {
-  if (whole <= 0 || part <= 0) return null
+  if (!Number.isFinite(part) || !Number.isFinite(whole) || whole <= 0 || part < 0) return null
   return Math.min(100, Math.round((part / whole) * 100))
 }
 

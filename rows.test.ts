@@ -468,15 +468,15 @@ test("a declared wired limit puts the bar on its own line under Memory", () => {
   assert.ok(withCeiling)
   assert.equal(withCeiling.note, undefined, "the heading stays still while the numbers move")
   assert.deepEqual(text(withCeiling.rows), [
-    "▮▮▮▮▮▮░░░░ 63% of 117G wired",
+    "▮▮▮▮▮▮░░░░ 63% · of 117G wired",
     "mlx-serve 72.1G · pool 0.7G",
     "free 44.5G · peak 75.7G",
     "ngram 29.8G",
   ], "no footprint row: it would repeat the bar")
 
   const firstRow = (wiredLimitGb: number) => text(buildSections(input({ wiredLimitGb }), ["memory"])[0]?.rows ?? [])[0] ?? ""
-  assert.match(firstRow(77), /95% of 77.0G wired/)
-  assert.match(firstRow(80), /92% of 80.0G wired/)
+  assert.match(firstRow(77), /95% · of 77.0G wired/)
+  assert.match(firstRow(80), /92% · of 80.0G wired/)
 
   const without = buildSections(input(), ["memory"])[0]
   assert.equal(without.note, undefined, "no declaration, no bar")
@@ -487,7 +487,7 @@ test("the wired bar needs a ceiling and a feed, and reads on without one", () =>
   const firstRow = (part: Partial<PanelInput>) => text(buildSections(input(part), ["memory"])[0]?.rows ?? [])[0] ?? ""
   assert.equal(firstRow({}), "footprint 73.3G", "nothing declared: plain bytes")
   assert.equal(firstRow({ wiredLimitGb: 0 }), "footprint 73.3G", "zero is not a ceiling")
-  assert.equal(firstRow({ wiredLimitGb: 117.1875, ratioCells: 0 }), "63% of 117G wired", "cells 0 drops the bar but keeps the reading, with no stray space")
+  assert.equal(firstRow({ wiredLimitGb: 117.1875, ratioCells: 0 }), "63% · of 117G wired", "cells 0 drops the bar but keeps the reading, with no stray space")
   assert.equal(firstRow({ service: null, wiredLimitGb: 117 }), "", "no feed, no section to hold the bar")
 })
 test("acceptance keeps the gauge, the percent, and only room for one note", () => {

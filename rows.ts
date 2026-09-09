@@ -390,9 +390,9 @@ function memoryRows(s: ServiceStats, input: PanelInput): SidebarRow[] {
     const fraction = ratio(s.memGb, ceiling) ?? 0
     const cells = input.ratioCells ?? 0
     const pct = Math.round(fraction * 100)
-    // No label: the bar is the section's headline number, in the exact words
-    // the heading gauge used to carry.
-    rows.push({ label: "", value: `${gauge(fraction, cells)}${pct}% of ${fmtGib(ceiling)} wired` })
+    // No label: the bar is the section's headline number. The ceiling it is
+    // measured against rides dim behind it, so only the reading is bright.
+    rows.push(row("", `${gauge(fraction, cells)}${pct}%`, `· of ${fmtGib(ceiling)} wired`))
   } else if (s.memGb !== null) {
     rows.push(row("footprint", `${s.memGb.toFixed(1)}G`))
   }

@@ -1,5 +1,7 @@
 # MLX Serve Monitor
 
+![OpenCode 2 with the MLX Serve Monitor sidebar and the turn meter in the footer](docs/screenshot.png)
+
 An OpenCode 2 CLI plugin that shows what a local **mlx-serve** is doing while it
 is OpenCode's model: a stats panel in the session sidebar and a turn meter in the
 prompt footer.

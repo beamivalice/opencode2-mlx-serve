@@ -642,6 +642,11 @@ const definition = {
       </text>
     )
 
+    /**
+     * Keyed by label: the numbers change every frame, the lines do not. An
+     * unkeyed `For` sees a fresh array of fresh objects on every repaint and
+     * rebuilds every row, which redraws the whole panel eight times a second.
+     */
     const Block = (props: { section: SidebarSection }) => (
       <box>
         <text fg={bright()} wrapMode="none" truncate>
@@ -649,7 +654,9 @@ const definition = {
           {/* Heading gauges use the value colour, same as row gauges. */}
           {props.section.note === undefined ? null : <span style={{ fg: bright() }}> {props.section.note}</span>}
         </text>
-        <For each={props.section.rows}>{(row) => <Row label={row.label} value={row.value} note={row.note} tone={row.tone} noteBright={row.noteBright} />}</For>
+        <For each={props.section.rows} key={(row) => row.label}>
+          {(row) => <Row label={row.label} value={row.value} note={row.note} tone={row.tone} noteBright={row.noteBright} />}
+        </For>
       </box>
     )
 
@@ -667,7 +674,9 @@ const definition = {
       })
       return (
         <box gap={1}>
-          <For each={sections()}>{(section) => <Block section={section} />}</For>
+          <For each={sections()} key={(section) => section.name}>
+            {(section) => <Block section={section} />}
+          </For>
         </box>
       )
     }

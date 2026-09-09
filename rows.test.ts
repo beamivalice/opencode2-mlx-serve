@@ -15,7 +15,7 @@ import {
   type PanelInput,
   type SidebarRow,
 } from "./rows.ts"
-import { HOT_TIER_LINE, SSD_TIER_LINE, CHAT_LINE, GATED_LINE, LIVE_MODELS, LIVE_PROPS, MTP_LINE, RESPONSES_LINE, feed } from "./fixtures.ts"
+import { HOT_TIER_LINE, SSD_TIER_LINE, CHAT_LINE, GATED_LINE, LIVE_MODELS, LIVE_PROPS, MTP_LINE, RESPONSES_LINE, feed, raw } from "./fixtures.ts"
 import type { LogStatus, Observed } from "./logtail.ts"
 import type { SamplingStats, ServiceStats } from "./stats.ts"
 import type { SpeedValue } from "./tracker.ts"
@@ -140,19 +140,91 @@ test("turn rows keep the estimate marker the footer HUD had", () => {
 
 // --- server sections -------------------------------------------------------
 
-test("throughput shows live rates when the server is busy and averages when it is not", () => {
+test("throughput shows live rates when the server is busy and zeros with averages when it is not", () => {
   const busy = new ServiceTracker()
   busy.sample(feed({ gauges: { generation_tokens_live: 1000, requests_running: 1 } }), NOW - 1_000)
   busy.sample(feed({ gauges: { generation_tokens_live: 1030, requests_running: 1 } }), NOW)
-  assert.deepEqual(buildSections(input({ service: busy.statsAt(NOW)! }), ["throughput"])[0]?.rows.length, 1)
-  assert.equal(section("throughput", input({ service: busy.statsAt(NOW)! }))[0], "decode 30.0 t/s · avg 68.9")
+  assert.deepEqual(section("throughput", input({ service: busy.statsAt(NOW)! })), [
+    "decode 30.0 t/s · avg 68.9",
+    "prefill 0.0 t/s · avg 1311",
+    "admitted 0.00 req/s",
+  ])
 
   const idle = new ServiceTracker()
   idle.sample(feed({ gauges: { requests_running: 0, requests_prefilling: 0 } }), NOW)
   assert.deepEqual(section("throughput", input({ service: idle.statsAt(NOW)! })), [
-    "prefill 1311 t/s · avg",
-    "decode 68.9 t/s · avg",
+    "decode 0.0 t/s · avg 68.9",
+    "prefill 0.0 t/s · avg 1311",
+    "admitted 0.00 req/s",
   ])
+})
+
+test("with nothing measured since boot, both lines still show 0", () => {
+  const t = new ServiceTracker()
+  t.sample(
+    parseFeed(
+      raw({
+        counters: {
+          prompt_tokens_total: 0,
+          prefill_tokens_total: 0,
+          generation_tokens_total: 0,
+          requests_success_total: 0,
+          prefix_cache_queries_total: 0,
+          prefix_cache_hits_total: 0,
+        },
+        gauges: { requests_running: 0, requests_waiting: 0, requests_prefilling: 0 },
+        histograms: {},
+      }),
+    ),
+    NOW,
+  )
+  assert.deepEqual(section("throughput", input({ service: t.statsAt(NOW)! })), [
+    "decode 0.0 t/s · avg —",
+    "prefill 0.0 t/s · avg —",
+    "admitted 0.00 req/s",
+  ])
+})
+
+test("a phase that ends keeps its Throughput line", () => {
+  // The blink this fixes: prefill measured, decode idle (and the other way
+  // round) used to draw one line where the idle server draws two, so every line
+  // under Throughput jumped twice per turn.
+  const lines = (s: ServiceStats) => section("throughput", input({ service: s }))
+
+  const prefilling = new ServiceTracker()
+  prefilling.sample(
+    feed({ gauges: { prefill_tokens_live: 8192, requests_prefilling: 1, requests_running: 1 } }),
+    NOW - 2_000,
+  )
+  prefilling.sample(
+    feed({ gauges: { prefill_tokens_live: 24576, requests_prefilling: 1, requests_running: 1 } }),
+    NOW,
+  )
+  const prefillStats = prefilling.statsAt(NOW)!
+  assert.equal(prefillStats.phase, "prefill")
+  assert.equal(prefillStats.genTps, null, "no token decoded in this window")
+  assert.deepEqual(lines(prefillStats), [
+    "decode 0.0 t/s · avg 68.9",
+    "prefill 8192 t/s · avg 1311",
+    "admitted 0.00 req/s",
+  ])
+
+  const decoding = new ServiceTracker()
+  decoding.sample(feed({ gauges: { generation_tokens_live: 1000, requests_running: 1 } }), NOW - 1_000)
+  decoding.sample(feed({ gauges: { generation_tokens_live: 1030, requests_running: 1 } }), NOW)
+  assert.deepEqual(
+    lines(decoding.statsAt(NOW)!).map((l) => l.split(" ")[0]),
+    ["decode", "prefill", "admitted"],
+    "decoding draws the same lines prefilling draws",
+  )
+
+  const idle = new ServiceTracker()
+  idle.sample(feed({ gauges: { requests_running: 0, requests_prefilling: 0 } }), NOW)
+  assert.deepEqual(
+    lines(idle.statsAt(NOW)!).map((l) => l.split(" ")[0]),
+    ["decode", "prefill", "admitted"],
+    "and the same lines idle",
+  )
 })
 
 test("the prefill bar fills against the yardstick, saturates past it", () => {
@@ -252,7 +324,12 @@ test("one client in flight: throughput does not repeat the turn's rate", () => {
     input({ speed: speed({ genTps: 30, prefillTps: null, prefillTokens: null, ttftMs: null }), service: stats }),
     ["turn", "throughput"],
   ).flatMap(render)
-  assert.deepEqual(rows, ["decode 30.0 t/s · 1.4k tok", "decode avg 68.9 t/s · since boot"])
+  assert.deepEqual(rows, [
+    "decode 30.0 t/s · 1.4k tok",
+    "decode 68.9 t/s · since boot",
+    "prefill 0.0 t/s · avg 1311",
+    "admitted 0.00 req/s",
+  ])
 })
 
 test("Throughput carries the admission rate the Queue section used to own", () => {
@@ -279,8 +356,13 @@ test("two clients in flight: both rates stay, and the turn's names the crowd", (
     input({ speed: speed({ genTps: 12.5, prefillTps: null, prefillTokens: null, ttftMs: null }), service: stats }),
     ["turn", "throughput"],
   ).flatMap(render)
-  assert.deepEqual(rows, ["decode 12.5 t/s · 1.4k tok · 2 clients", "decode 130 t/s · avg 68.9"])
-  assert.equal(rows.length, 2, "two clients: the server-wide rate is a different measurement, so it stays")
+  assert.deepEqual(rows, [
+    "decode 12.5 t/s · 1.4k tok · 2 clients",
+    "decode 130 t/s · avg 68.9",
+    "prefill 0.0 t/s · avg 1311",
+    "admitted 0.00 req/s",
+  ])
+  assert.equal(rows.length, 4, "two clients: the server-wide rate is a different measurement, so it stays")
 })
 
 test("the sparkline row is opt-in by cells and never stretches past them", () => {
@@ -595,6 +677,15 @@ test("an integration that threw is named on screen instead of hidden", () => {
   ])
   assert.equal(clip("abcdefghij", 6), "abcde…")
   assert.equal(clip("short", 12), "short", "nothing to truncate")
+})
+
+test("two failures in the same place get two lines", () => {
+  // A row label is the sidebar's render key: a repeat would merge two rows.
+  const rows = buildSections(
+    input({ attachErrors: [{ where: "ui.slot", detail: "first" }, { where: "ui.slot", detail: "second" }] }),
+    ["attach"],
+  )
+  assert.deepEqual(render(rows[0] ?? { rows: [] }), ["ui.slot first · degraded", "ui.slot 2 second · degraded"])
 })
 
 test("rows fit a narrow sidebar", () => {

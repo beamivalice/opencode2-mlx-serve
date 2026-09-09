@@ -33,7 +33,11 @@ import type { LogStatus, Observed } from "./logtail.ts"
 import type { SpeedValue } from "./tracker.ts"
 
 export interface SidebarRow {
-  /** Dimmed key. */
+  /**
+   * Dimmed key. Also the sidebar's render key: a section's labels must be unique
+   * and stay the same between repaints, or the line is torn down and built again
+   * and everything under it jumps.
+   */
   readonly label: string
   /** Colour for the value: a status worth colouring, a number that is not. */
   readonly tone?: Tone
@@ -290,9 +294,16 @@ function sameRate(rates: ReadonlyMap<string, number>, label: string, value: numb
 }
 
 /**
- * Server-wide throughput. With one request in flight the server's live rate is
- * the turn's rate, so when the Turn section already drew it this section shows
- * the since-boot average instead.
+ * Server-wide throughput: `decode` and `prefill` on fixed lines, in that order,
+ * plus the 60s trace and the admission rate. A rate that nothing is measuring
+ * reads `0.0 t/s` with the since-boot average behind it — it never drops its
+ * line. Every line below a removed one moves up, and the sidebar redraws the
+ * whole panel when it does, so a finished prefill used to blink the panel twice:
+ * once when the prefill line went away, once when it came back.
+ *
+ * With one request in flight the server's live rate is this turn's rate, so when
+ * the Turn section already drew that number this row yields to the since-boot
+ * average. It keeps the same label — and therefore the same line — to do it.
  */
 function throughputRows(
   s: ServiceStats,
@@ -300,29 +311,22 @@ function throughputRows(
   already: ReadonlyMap<string, number>,
   inflight: number,
 ): SidebarRow[] {
-  const rows: SidebarRow[] = []
-  const avg = (label: string, value: number | null): SidebarRow | null =>
-    value === null ? null : row(`${label} avg`, `${fmtRate(value)} t/s`, "· since boot")
-  // With two or more in flight the two rates are different numbers and both stay.
-  const dup = inflight <= 1
-  if (s.genTps !== null) {
-    const live = row("decode", `${fmtRate(s.genTps)} t/s`, `· avg ${fmtRate(s.avgGenTps)}`)
-    rows.push(dup && sameRate(already, "decode", s.genTps) ? (avg("decode", s.avgGenTps) ?? live) : live)
+  const rate = (label: string, live: number | null, avg: number | null): SidebarRow => {
+    if (live === null) return row(label, `${fmtRate(0)} t/s`, `· avg ${fmtRate(avg)}`)
+    // One request in flight: the Turn section already drew this rate, so the line
+    // carries the since-boot average instead of a repeat. With two or more the
+    // two are different measurements, and the server-wide one stays.
+    if (inflight <= 1 && avg !== null && sameRate(already, label, live)) {
+      return row(label, `${fmtRate(avg)} t/s`, "· since boot")
+    }
+    return row(label, `${fmtRate(live)} t/s`, `· avg ${fmtRate(avg)}`)
   }
-  if (s.prefillTps !== null) {
-    const live = row("prefill", `${fmtRate(s.prefillTps)} t/s`, `· avg ${fmtRate(s.avgPrefillTps)}`)
-    rows.push(dup && sameRate(already, "prefill", s.prefillTps) ? (avg("prefill", s.avgPrefillTps) ?? live) : live)
-  }
-  if (s.genTps === null && s.prefillTps === null) {
-    // Nothing running: show the cumulative averages.
-    if (s.avgPrefillTps !== null) rows.push(row("prefill", `${fmtRate(s.avgPrefillTps)} t/s`, "· avg"))
-    if (s.avgGenTps !== null) rows.push(row("decode", `${fmtRate(s.avgGenTps)} t/s`, "· avg"))
-  }
+  const rows = [rate("decode", s.genTps, s.avgGenTps), rate("prefill", s.prefillTps, s.avgPrefillTps)]
   const spark = sparkline(s.genSeries, cells)
   if (spark !== "") rows.push(row("60s", spark))
   // Admissions per second over 60s. ~0.07 is one agent working; a jump is the
-  // earliest sign of a second client.
-  if (s.reqPerSec !== null) rows.push(row("admitted", `${s.reqPerSec.toFixed(2)} req/s`))
+  // earliest sign of a second client. Idle is 0.00, not an absent line.
+  rows.push(row("admitted", `${(s.reqPerSec ?? 0).toFixed(2)} req/s`))
   return rows
 }
 
@@ -522,7 +526,15 @@ function logRows(input: PanelInput): SidebarRow[] {
 /** The plugin's own health: which host integration threw. Drawn whenever one did. */
 function attachRows(input: PanelInput): SidebarRow[] {
   const errors = input.attachErrors ?? []
-  return errors.slice(0, 4).map((failure) => row(failure.where, clip(failure.detail, 34), "· degraded"))
+  const seen = new Map<string, number>()
+  // Labels are render keys, so a second failure in the same place is numbered
+  // rather than sharing a line with the first.
+  return errors.slice(0, 4).map((failure) => {
+    const n = (seen.get(failure.where) ?? 0) + 1
+    seen.set(failure.where, n)
+    const label = n === 1 ? failure.where : `${failure.where} ${n}`
+    return row(label, clip(failure.detail, 34), "· degraded")
+  })
 }
 
 /** Truncated to fit the column, with the cut made visible. */

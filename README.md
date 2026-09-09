@@ -65,7 +65,7 @@ server is visible rather than absent.
 
 | Section | Rows |
 | --- | --- |
-| Throughput | live decode and prefill tok/s beside their since-boot averages, a 60-second sparkline, admitted req/s |
+| Throughput | `decode` and `prefill` tok/s, each on its own permanent line with its since-boot average behind it, a 60-second sparkline, admitted req/s |
 | Server | `model`, `kv-quant`, `context` (exact digits), `spec mtp head · <arch>`, a GPU gauge, `running N · M waiting` |
 | Prefix cache | share of billed prompt tokens restored from cache, share of requests with a hit, `hot` and `ssd` tiers gauged against their own caps |
 | Memory | heading gauge `Memory ▮▮▮▮▮▮▮░░░ 79% of 117G wired` when a ceiling is known, else a plain `footprint` row; MLX in-use vs pool, free RAM and peak, ANE bytes, n-gram table |
@@ -79,10 +79,35 @@ server is visible rather than absent.
 
 `generation_tokens_live` is a server-wide counter. With one request in flight the
 footer meter and the Throughput section are the same measurement, and if `turn` is
-in `sections` the Throughput row yields to the since-boot average instead of
-repeating it. With two or more in flight the footer meter switches to this
-session's streamed bytes (marked `~`) while Throughput keeps the server's combined
-rate.
+in `sections` the Throughput `decode` line yields to the since-boot average
+(`decode 68.9 t/s · since boot`) instead of repeating it. With two or more in
+flight the footer meter switches to this session's streamed bytes (marked `~`)
+while Throughput keeps the server's combined rate.
+
+### Throughput lines do not come and go
+
+A finished prefill used to take its line with it, and every line below the one
+that moved was redrawn — twice a turn. So `decode`, `prefill` and `admitted` hold
+their lines for as long as the feed answers, and a rate nothing is measuring now
+reads as zero beside the average it does have:
+
+```
+Throughput                      ← what the section looks like while decoding
+decode   30.0 t/s · avg 68.9
+prefill   0.0 t/s · avg 1311    ← not prefilling: zero, and the average anyway
+admitted  0.00 req/s
+```
+
+| Row | Prefilling | Decoding | Idle |
+| --- | --- | --- | --- |
+| `decode` | `0.0 t/s · avg 68.9` | `30.0 t/s · avg 68.9` | `0.0 t/s · avg 68.9` |
+| `prefill` | `8192 t/s · avg 1311` | `0.0 t/s · avg 1311` | `0.0 t/s · avg 1311` |
+| `admitted` | `0.00 req/s` | `0.00 req/s` | `0.00 req/s` |
+
+`0.0` means the counter did not move in the window, not that it measured a slow
+phase; the reason the window is empty (idle server, `--metrics off`, unreachable)
+is in the `feed` row of Server log. The sidebar renders each row by its label, so
+a line whose number merely changed is updated in place rather than rebuilt.
 
 ### Gauges, bars, sparklines
 

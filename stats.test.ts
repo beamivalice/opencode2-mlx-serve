@@ -396,7 +396,8 @@ test("formatters keep narrow columns", () => {
   assert.equal(fmtDur(125_000), "2m05s")
   assert.equal(fmtBytes(700), "700B")
   assert.equal(fmtBytes(40 * 1024), "40K")
-  assert.equal(fmtBytes(2 * 1024 ** 3), "2.0G")
+  assert.equal(fmtBytes(13_500_000), "12.9M")
+  assert.equal(fmtBytes(2 * 1024 ** 3), "2.00G")
 })
 
 // --- regressions -----------------------------------------------------------

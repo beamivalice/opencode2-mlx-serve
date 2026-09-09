@@ -398,10 +398,10 @@ function memoryRows(s: ServiceStats, input: PanelInput): SidebarRow[] {
   }
   // MLX's allocator holds bytes in use plus a reclaimable pool not yet returned.
   if (s.mlxActiveGb !== null) {
-    rows.push(row("mlx in use", fmtGib(s.mlxActiveGb), `· pool ${fmtGib(s.mlxPoolGb)}`))
+    rows.push(row("mlx-serve", fmtGib(s.mlxActiveGb), `· pool ${fmtGib(s.mlxPoolGb)}`))
   }
   if (s.freeRamGb !== null) {
-    rows.push(row("ram free", fmtGib(s.freeRamGb), `· peak ${fmtGib(s.peakRamGb)}`))
+    rows.push(row("free", fmtGib(s.freeRamGb), `· peak ${fmtGib(s.peakRamGb)}`))
   }
   if (s.aneBytes > 0) rows.push(row("ane", fmtGib(s.aneBytes / 1024 ** 3), `· ${s.aneLayers} layers`))
   if (s.ngramBytes > 0) {

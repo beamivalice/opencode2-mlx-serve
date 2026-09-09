@@ -821,8 +821,8 @@ export function mbToGb(mb: number | null | undefined): number | null {
 }
 
 export function fmtBytes(n: number): string {
-  if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(1)}G`
-  if (n >= 1024 ** 2) return `${Math.round(n / 1024 ** 2)}M`
+  if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(2)}G`
+  if (n >= 1024 ** 2) return `${(n / 1024 ** 2).toFixed(1)}M`
   if (n >= 1024) return `${Math.round(n / 1024)}K`
   return `${n}B`
 }

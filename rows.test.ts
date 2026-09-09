@@ -393,8 +393,8 @@ test("the queue has no section of its own any more", () => {
 test("memory rows carry the allocator split and the accelerator warm", () => {
   assert.deepEqual(section("memory"), [
     "footprint 73.3G",
-    "mlx in use 72.1G · pool 0.7G",
-    "ram free 44.5G · peak 75.7G",
+    "mlx-serve 72.1G · pool 0.7G",
+    "free 44.5G · peak 75.7G",
     "ngram 29.8G",
   ])
 
@@ -469,8 +469,8 @@ test("a declared wired limit puts the bar on its own line under Memory", () => {
   assert.equal(withCeiling.note, undefined, "the heading stays still while the numbers move")
   assert.deepEqual(text(withCeiling.rows), [
     "▮▮▮▮▮▮░░░░ 63% of 117G wired",
-    "mlx in use 72.1G · pool 0.7G",
-    "ram free 44.5G · peak 75.7G",
+    "mlx-serve 72.1G · pool 0.7G",
+    "free 44.5G · peak 75.7G",
     "ngram 29.8G",
   ], "no footprint row: it would repeat the bar")
 

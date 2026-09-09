@@ -35,11 +35,15 @@ meter stays in the footer.
 
 ## Footer meter
 
+The footer draws one line in exactly three shapes, so it never breathes while
+the numbers move. Every slot draws in every shape, zero-filled — nothing pops
+in or out mid-turn:
+
 ```
-prefill █████░░░░░░░░░░░░░ 12,288/~48,000 · 10.2k t/s · ~3s left   ← prefilling
-~1,833 tok · decode ~24.0 t/s ▁▂▅█▆▃                                ← decoding
-~17,453 tok · decode ~24.0 t/s · 1m15s                             ← long turn
-288 tok · decode 24.0 t/s · prefill 10.0k t/s                      ← settled from usage
+prefill ███░░░░░░░ 12,400/~48,000 · 1600 t/s · ~22s left   ← prefilling
+prefill 8,192 tok · 6827 t/s                              ← prefilling, no yardstick yet
+1,833 tok · decode 24.0 t/s · prefill 10.0k t/s           ← decoding
+0 tok · decode 0.0 t/s · prefill 0.0 t/s                  ← quiet zeros between steps
 ```
 
 - Token counts print in full with thousands separators; rates use the compact
@@ -50,12 +54,10 @@ prefill █████░░░░░░░░░░░░░ 12,288/~48,000 ·
   (`prompt − cached`), because mlx-serve publishes `prefill_tokens_live` but the
   total only arrives in `usage` after the step. When this turn forwards more than
   the last one the bar saturates and reads `past last turn`. With no previous
-  step, or `barCells: 0`, the line is `prefill 12,288 tok · 10.2k t/s`.
-- The sparkline after the decode rate is this turn's decode rate, one point per
-  second, sampled from the meter's own windowed `genTps` and scaled zero-to-peak
-  like the panel's `60s` sparkline. A per-cell delta series was tried and
-  reverted: it showed tool pauses as cliffs. Seconds with no rate are not
-  sampled, and a flat or absent series draws nothing.
+  step, or `footerBarCells: 0`, the line is the plain rate shape. A fully-cached
+  step forwards nothing and settles nothing: it reads as waiting, never `0/…`.
+- A finished step retires the prefill phase even when no token ever flipped it,
+  so the meter cannot freeze on a finished prefill between steps.
 
 ## Panel sections
 
@@ -186,8 +188,8 @@ restart.
         "sections": ["throughput", "server", "cache", "memory", "spec", "sampling", "log"],
         "sparkCells": 24,
         "barCells": 18,
+        "footerBarCells": 10,
         "ratioCells": 8,
-        "historyCells": 14,
         "diskCacheGb": 100,
         "wiredLimitGb": null,
         "refreshHz": 8,
@@ -214,9 +216,9 @@ restart.
   ignored; an empty list draws nothing; a malformed value falls back to the
   default. Add `"turn"` or `"attach"` to opt those in; `attach` also appears by
   itself whenever a host integration threw.
-- `sparkCells: 0` removes the sparkline; `barCells: 0` makes the prefill line a
-  plain rate; `ratioCells: 0` draws percentages without gauges;
-  `historyCells: 0` omits the footer's decode-rate sparkline.
+- `sparkCells: 0` removes the sparkline; `barCells: 0` makes the panel prefill
+  line a plain rate and `footerBarCells: 0` does the same for the footer;
+  `ratioCells: 0` draws percentages without gauges.
 - `diskCacheGb` is the SSD tier cap in GiB (`--prefix-cache-disk`).
 - `wiredLimitGb` overrides the `iogpu.wired_limit_mb` sysctl.
 - `bytesPerToken` is only used when the server gives no token counts.

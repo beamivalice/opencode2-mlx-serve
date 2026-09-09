@@ -36,10 +36,10 @@ export interface ServeOptions {
   readonly sparkCells: number
   /** Prefill progress bar width in cells; 0 falls back to the plain rate. */
   readonly barCells: number
+  /** The same bar in the prompt footer, where room is scarce; 0 falls back to the plain rate. */
+  readonly footerBarCells: number
   /** Ratio-bar width in cells; 0 draws percentages only. */
   readonly ratioCells: number
-  /** Width of the footer's decode-rate histogram in cells; 0 omits it. */
-  readonly historyCells: number
   /**
    * The SSD tier's cap in GiB, for the `ssd` gauge: it is the server's
    * `--prefix-cache-disk` flag and appears in no log line or endpoint, so the
@@ -69,8 +69,8 @@ export const DEFAULTS: ServeOptions = {
   sections: [...DEFAULT_SECTIONS],
   sparkCells: 24,
   barCells: 18,
+  footerBarCells: 10,
   ratioCells: 8,
-  historyCells: 14,
   diskCacheGb: null,
   wiredLimitGb: null,
 }
@@ -122,8 +122,8 @@ export function resolveOptions(raw: Record<string, unknown> | undefined): ServeO
     sections: resolveSections(src.sections, DEFAULT_SECTIONS),
     sparkCells: clamp(src.sparkCells, DEFAULTS.sparkCells, 0, 60),
     barCells: clamp(src.barCells, DEFAULTS.barCells, 0, 40),
+    footerBarCells: clamp(src.footerBarCells, DEFAULTS.footerBarCells, 0, 40),
     ratioCells: clamp(src.ratioCells, DEFAULTS.ratioCells, 0, 20),
-    historyCells: clamp(src.historyCells, DEFAULTS.historyCells, 0, 60),
     // Only an explicit, sane number counts; anything else means no gauge.
     diskCacheGb:
       typeof src.diskCacheGb === "number" && Number.isFinite(src.diskCacheGb) && src.diskCacheGb >= 0.5 && src.diskCacheGb <= 65536

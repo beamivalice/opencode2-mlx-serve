@@ -697,72 +697,45 @@ export function buildSections(input: PanelInput, enabled: readonly SectionName[]
 // ---------------------------------------------------------------------------
 
 /**
- * The footer's one line of turn stats. During prefill it is a progress bar:
- * `prefill ██████████░░░░░░░░ 12.4k/~48.0k · 1600 t/s · ~22s left`.
- * No memory figure or ttft here; those belong to the panel.
+ * The footer's one line of turn stats, in exactly three shapes — a prefill
+ * bar, a prefill rate, or a decode line — so the line never breathes while the
+ * numbers move. Every slot draws in every shape, zero-filled: nothing pops in
+ * or out mid-turn. ttft, age and history live in the panel, not here.
  */
 export function footerLabel(speed: SpeedValue | null, options: FooterOptions = {}): string | null {
   if (!speed) return null
-  if (speed.phase === "prefill") return prefillLine(speed, options.barCells ?? 0)
+  if (speed.phase === "prefill") {
+    const base = speed.prefillBaseline
+    if ((options.barCells ?? 0) > 0 && base !== null && base > 0) return prefillBarLine(speed, base, options.barCells ?? 0)
+    return prefillRateLine(speed)
+  }
 
-  // Tokens, then the decode rate with its sparkline glued on (after a `·` it
-  // would read as a separate statistic), then prefill, then the turn's age.
   const approx = speed.tokensEstimated ? "~" : ""
-  const bits: string[] = []
-  const spark = footerSpark(options.series ?? null, options.historyCells ?? 0)
-  if (speed.genTokens > 0) bits.push(`${approx}${fmtExact(speed.genTokens)} tok`)
-  if (speed.genTps !== null) bits.push(`decode ${approx}${fmtRate(speed.genTps)} t/s${spark === "" ? "" : ` ${spark}`}`)
-  else if (spark !== "") bits.push(`decode ${spark}`)
-  if (speed.prefillTps !== null) bits.push(`prefill ${fmtRate(speed.prefillTps)} t/s`)
-  if (speed.elapsedMs >= 60_000) bits.push(fmtDur(speed.elapsedMs))
-  return bits.length > 0 ? bits.join(" · ") : null
+  return `${approx}${fmtExact(speed.genTokens)} tok · decode ${approx}${fmtRate(speed.genTps ?? 0)} t/s · prefill ${fmtRate(speed.prefillTps ?? 0)} t/s`
 }
 
 export interface FooterOptions {
   /** Prefill progress-bar width in cells; 0 keeps the plain rate line. */
   readonly barCells?: number
-  /** Width of the decode-rate history drawn at the end of the line; 0 omits it. */
-  readonly historyCells?: number
-  /** This turn's decode rate, one point per cell, oldest first. */
-  readonly series?: readonly number[] | null
 }
 
-/**
- * The turn's decode-rate history as `▁▂▅█▆▃`, on the same zero-to-peak scale as
- * the panel's `60s` sparkline. Sampled from the windowed `genTps` the headline
- * shows, so the trace is smooth by design. A flat or absent history draws
- * nothing rather than a row of baselines.
- */
-export function footerSpark(series: readonly number[] | null | undefined, cells: number): string {
-  if (cells <= 0 || !series || series.length < 2) return ""
-  const window = series.slice(-cells)
-  const peak = Math.max(...window)
-  const floor = Math.min(...window)
-  if (peak <= 0 || peak - floor < peak * 0.02) return ""
-  return sparkline(window, cells)
+/** Prefill with a yardstick: bar, live count, rate and eta — every slot always. */
+function prefillBarLine(speed: SpeedValue, base: number, cells: number): string {
+  const live = speed.prefillTokens ?? 0
+  const tps = speed.prefillTps ?? 0
+  // A measured rate of 0 divides nothing: it reads as still measuring, not as
+  // an infinite eta (remaining / 0).
+  const eta =
+    tps > 0
+      ? base - live > 0
+        ? `~${Math.max(1, Math.round((base - live) / tps))}s left`
+        : "past last turn"
+      : "measuring"
+  return `prefill ${progressBar(live / base, cells)} ${fmtExact(live)}/~${fmtExact(base)} · ${fmtRate(tps)} t/s · ${eta}`
 }
 
-/** Prefill: progress bar when there is a yardstick, tokens and rate when there is not. */
-function prefillLine(speed: SpeedValue, cells: number): string | null {
-  const live = speed.prefillTokens
-  const base = speed.prefillBaseline
-  const rate = speed.prefillTps === null ? null : `${fmtRate(speed.prefillTps)} t/s`
-
-  if (cells > 0 && base !== null && base > 0 && live !== null) {
-    const remaining = base - live
-    const parts = [`prefill ${progressBar(live / base, cells)} ${fmtExact(live)}/~${fmtExact(base)}`]
-    if (rate === null) parts.push("measuring")
-    else {
-      parts.push(rate)
-      parts.push(remaining > 0 ? `~${Math.max(1, Math.round(remaining / (speed.prefillTps as number)))}s left` : "past last turn")
-    }
-    return parts.join(" · ")
-  }
-
-  const bits: string[] = []
-  if (live !== null) bits.push(`prefill ${fmtExact(live)} tok`)
-  if (rate !== null) bits.push(bits.length > 0 ? rate : `prefill ${rate}`)
-  else if (live === null) bits.push(`prefill ${fmtDur(speed.elapsedMs)}`)
-  if (speed.ttftMs !== null) bits.push(`ttft ${fmtMs(speed.ttftMs)}`)
-  return bits.length > 0 ? bits.join(" · ") : null
+/** Prefill without a yardstick: tokens and rate, zero-filled like the bar. */
+function prefillRateLine(speed: SpeedValue): string {
+  const live = speed.prefillTokens ?? 0
+  return `prefill ${fmtExact(live)} tok · ${fmtRate(speed.prefillTps ?? 0)} t/s`
 }

@@ -7,7 +7,6 @@ import {
   buildSections,
   clip,
   footerLabel,
-  footerSpark,
   feedStatus,
   resolveSections,
   turnRows,
@@ -274,42 +273,39 @@ test("barCells 0 keeps the old two-line meter exactly", () => {
   assert.deepEqual(text(rows), ["prefill 4200 t/s · 128.0k tok"])
 })
 
-test("the footer history is a zero-to-peak trace of the meter's own rate", () => {
-  assert.equal(footerSpark([24, 26, 25, 30, 22], 5), "▇▇▇█▆", "0..max: the scale the panel uses everywhere")
-  assert.equal(footerSpark([22, 30, 24, 26, 25], 5), "▆█▇▇▇")
-  assert.equal(footerSpark([30, 30, 30, 30], 4), "", "steady is flat, and flat draws nothing")
-  assert.equal(footerSpark([0, 0, 0], 3), "", "an all-zero series is not a baseline")
-  assert.equal(footerSpark([1, 2], 0), "", "cells 0 omits the histogram")
-  assert.equal(footerSpark([1], 8), "", "one point is not a history")
-  assert.equal(footerSpark(null, 8), "")
-  assert.equal(footerSpark(Array.from({ length: 40 }, (_, k) => k), 6).length, 6, "a long history is cut to the cells asked for")
-  assert.equal(footerSpark.length, 2, "no third mode — the min..max scale was tried and read worse")
+test("the footer decode line always shows all three slots", () => {
+  assert.equal(footerLabel(speed({ prefillTps: null })), "1,400 tok · decode 24.6 t/s · prefill 0.0 t/s")
+  assert.equal(
+    footerLabel(speed({ genTps: null, prefillTps: 4200 })),
+    "1,400 tok · decode 0.0 t/s · prefill 4200 t/s",
+    "an unsettled rate reads as zero, not as a missing clause",
+  )
+  assert.equal(
+    footerLabel(speed({ genTokens: 0, genTps: null, prefillTps: null, tokensEstimated: true })),
+    "~0 tok · decode ~0.0 t/s · prefill 0.0 t/s",
+    "estimates stay marked, zeros stay visible",
+  )
 })
-test("the footer line reads rate then its histogram", () => {
-  const hist = { historyCells: 6, series: [20, 24, 28, 26, 30, 22] }
+
+test("the footer prefill shapes zero-fill every slot", () => {
   assert.equal(
-    footerLabel(speed({ prefillTps: null }), hist),
-    "1,400 tok · decode 24.6 t/s ▆▇█▇█▆ · 1m02s",
+    footerLabel(
+      speed({ phase: "prefill", prefillTokens: 12_400, prefillBaseline: 48_000, prefillTps: 1_600, genTps: null, ttftMs: null }),
+      { barCells: 10 },
+    ),
+    "prefill ███░░░░░░░ 12,400/~48,000 · 1600 t/s · ~22s left",
   )
   assert.equal(
-    footerLabel(speed({ prefillTps: null })),
-    "1,400 tok · decode 24.6 t/s · 1m02s",
-    "no series, no bars",
+    footerLabel(
+      speed({ phase: "prefill", prefillTokens: null, prefillBaseline: 48_000, prefillTps: null, genTps: null, ttftMs: null }),
+      { barCells: 10 },
+    ),
+    "prefill ░░░░░░░░░░ 0/~48,000 · 0.0 t/s · measuring",
   )
   assert.equal(
-    footerLabel(speed({ prefillTps: null }), { historyCells: 6, series: [30, 30, 30] }),
-    "1,400 tok · decode 24.6 t/s · 1m02s",
-    "a steady series is not a story",
-  )
-  assert.equal(
-    footerLabel(speed({ elapsedMs: 20_000 }), hist),
-    "1,400 tok · decode 24.6 t/s ▆▇█▇█▆ · prefill 4200 t/s",
-    "the histogram stays attached to the decode rate, ahead of the other clauses",
-  )
-  assert.equal(
-    footerLabel(speed({ genTps: null }), { historyCells: 4, series: [24, 20, 0, 0] }),
-    "1,400 tok · decode █▇▁▁ · prefill 4200 t/s · 1m02s",
-    "a rate that has not settled yet still shows its shape",
+    footerLabel(speed({ phase: "prefill", prefillTokens: null, prefillBaseline: null, prefillTps: null, genTps: null, ttftMs: null })),
+    "prefill 0 tok · 0.0 t/s",
+    "no yardstick, no bar — but the same two slots",
   )
 })
 

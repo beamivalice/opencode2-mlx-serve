@@ -184,33 +184,6 @@ const definition = {
     const activeSessions = new Set<string>()
     let lastSession: string | null = null
 
-    /**
-     * Per-session decode-rate history for the footer sparkline: one point per
-     * second, taken from the same `genTps` the footer prints, so the bars and the
-     * headline agree even when another client is decoding. The rate is already
-     * windowed, so the trace is smooth by design.
-     *
-     * Written only from `tick`, never from a memo: a memo that writes a signal it
-     * also reads re-triggers itself.
-     */
-    const history = new Map<string, number[]>()
-    let historySecond = 0
-
-    function sampleHistory(sessionID: string | null, now: number): void {
-      if (sessionID === null) return
-      const second = Math.floor(now / 1000)
-      if (second === historySecond) return
-      historySecond = second
-      const value = tracker.value(sessionID, now)
-      const rate = value?.genTps ?? null
-      if (rate === null) return
-      const points = history.get(sessionID) ?? []
-      points.push(rate)
-      // Keep a little more than the drawn window.
-      while (points.length > options.historyCells + 8) points.shift()
-      history.set(sessionID, points)
-    }
-
     // Server busyness is cached instead of recomputed eight times a second: the
     // tick only needs to know whether anything is still decoding.
     let serverBusyUntil = 0
@@ -444,8 +417,6 @@ const definition = {
         return
       }
       if (needed) {
-        // Sample, then paint: the memo has to read the history this tick wrote.
-        sampleHistory(lastSession, now)
         setVersion((v) => v + 1)
       }
       reportOnce()
@@ -529,8 +500,6 @@ const definition = {
       const sid = sessionIDOf(e)
       tracker.finish(sid, createdAt(e))
       activeSessions.delete(sid)
-      // The footer now draws the frozen value, which carries no series.
-      history.delete(sid)
       if (lastSession === sid) lastSession = null
       serverBusyUntil = 0
       startUi()
@@ -559,7 +528,6 @@ const definition = {
         if (sid === "") return
         claim(sid)
         tracker.beginRun(sid, createdAt(e))
-        history.delete(sid) // a new turn starts its own history
         startUi()
       }),
       listen("session.text.delta", onDelta),
@@ -583,7 +551,6 @@ const definition = {
         if (!instanceIsOurs() || !isNewEvent(e)) return
         const sid = sessionIDOf(e)
         tracker.evict(sid)
-        history.delete(sid)
         activeSessions.delete(sid)
         if (lastSession === sid) lastSession = null
         startUi()
@@ -701,13 +668,11 @@ const definition = {
         if (!instanceIsOurs()) return null
         const value = speedFor(props.sessionID)
         if (value === null) return null
-        // A prefill younger than ~5 frames has no tokens yet: drawing "prefill 0.0s"
-        // and replacing it a blink later is a flicker, not a measurement.
+        // A prefill younger than ~5 frames has no tokens yet: drawing a line
+        // that changes a blink later is a flicker, not a measurement.
         if (value.phase === "prefill" && value.elapsedMs < 80 && value.prefillTokens === null) return null
         return footerLabel(value, {
-          barCells: options.barCells,
-          historyCells: options.historyCells,
-          series: props.sessionID == null ? null : history.get(props.sessionID) ?? null,
+          barCells: options.footerBarCells,
         })
       })
       return (

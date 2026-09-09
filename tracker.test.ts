@@ -35,6 +35,43 @@ test("parseMetricsJson reads live gauges", () => {
   assert.equal(sample.running, true)
 })
 
+test("a fully-cached step never draws a 0/xx bar", () => {
+  const t = new SpeedTracker()
+  t.beginRun("s1", 0)
+  t.beginStep("s1", "m0", 0)
+  t.finishStep("s1", "m0", { input: 20_000, output: 100 }, 3_000)
+  t.beginStep("s1", "m1", 4_000)
+  // The whole prompt restored from cache, no tokens streamed, no samples.
+  t.finishStep("s1", "m1", { input: 5_000, output: 0, cacheRead: 5_000 }, 4_200)
+  const v = t.value("s1", 4_200)
+  assert.equal(v?.prefillTokens, null, "forwarded=0 is not a live reading")
+  assert.equal(v?.phase, "generate", "a settled step retires the prefill phase")
+  assert.equal(footerLabel(v, { barCells: 18 }), "100 tok · decode 0.0 t/s · prefill 0.0 t/s", "quiet zeros, not a 0/xx bar")
+})
+
+test("a settled step retires a live prefill phase", () => {
+  const t = new SpeedTracker()
+  t.beginRun("s1", 0)
+  t.beginStep("s1", "m1", 0)
+  t.applyMetrics("s1", { t: 500, prefillLive: 20_000, genLive: 0, prefilling: true, running: true })
+  assert.equal(t.value("s1", 500)?.phase, "prefill")
+  t.finishStep("s1", "m1", { input: 48_000, output: 50 }, 800)
+  const v = t.value("s1", 800)
+  assert.equal(v?.phase, "generate", "step.ended means the call — and its prefill — is over")
+  assert.equal(v?.prefillTokens, 48_000, "the settled count still reads as the last prefill")
+})
+
+test("another client's completions do not end our prefill", () => {
+  const t = new SpeedTracker()
+  t.beginRun("s1", 0)
+  t.beginStep("s1", "m1", 0)
+  t.applyMetrics("s1", { t: 1_000, prefillLive: 8_000, genLive: 5_000, prefilling: true, running: true, runningCount: 2 })
+  t.applyMetrics("s1", { t: 2_000, prefillLive: 16_000, genLive: 5_200, prefilling: true, running: true, runningCount: 2 })
+  assert.equal(t.value("s1", 2_000)?.phase, "prefill", "their 200 tokens are not our first token")
+  t.pushDelta("s1", "hello", 2_100, "m1")
+  assert.equal(t.value("s1", 2_100)?.phase, "generate", "our own bytes still flip it")
+})
+
 test("prefill phase reports live tokens and rate from metrics chunks", () => {
   const t = new SpeedTracker()
   t.beginRun("s1", 0)
@@ -189,7 +226,7 @@ test("the footer line is turn stats, and holds no memory figure", () => {
       elapsedMs: 4_200,
       tokensEstimated: true,
     }),
-    "prefill 4.2s",
+    "prefill 0 tok · 0.0 t/s",
   )
 
   assert.equal(

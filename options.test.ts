@@ -38,13 +38,15 @@ test("logPath off turns the tail off, an explicit path is honoured", () => {
 })
 
 test("a junk config cannot make the panel spin or stall", () => {
-  const o = resolveOptions({ refreshHz: 100_000, pollHz: -5, idlePollHz: "4", bytesPerToken: Number.NaN, sparkCells: 9999, barCells: 9999 })
+  const o = resolveOptions({ refreshHz: 100_000, pollHz: -5, idlePollHz: "4", bytesPerToken: Number.NaN, sparkCells: 9999, barCells: 9999, footerBarCells: 9999 })
   assert.equal(o.refreshHz, 30, "clamped to the host's ceiling")
   assert.equal(o.pollHz, 1, "a negative rate clamps to the floor instead of stopping the polls")
   assert.equal(o.idlePollHz, DEFAULTS.idlePollHz, "a string rate falls back")
   assert.equal(o.bytesPerToken, DEFAULTS.bytesPerToken)
   assert.equal(o.sparkCells, 60)
-  assert.equal(o.barCells, 40, "the footer is wide, so the bar may be too")
+  assert.equal(o.barCells, 40, "the panel is wide, so the bar may be too")
+  assert.equal(o.footerBarCells, 40)
+  assert.equal(resolveOptions({}).footerBarCells, 10, "the footer bar ships short")
 })
 
 test("turn is opt-in for people who want it in the panel too", () => {

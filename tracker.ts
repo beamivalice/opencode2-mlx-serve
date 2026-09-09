@@ -248,8 +248,11 @@ export class SpeedTracker {
 
     const last = st.genMetricSamples.at(-1)
     const lastGen = last?.tokens ?? 0
+    // `gen_live` counts every client: with company, their completions must not
+    // end our prefill — our own deltas (or the handoff poll below) flip it.
+    const shared = st.runningCount > 1
     if (generated > lastGen) {
-      if (st.phase === "prefill") {
+      if (st.phase === "prefill" && !shared) {
         st.phase = "generate"
         st.firstTokenAt = st.firstTokenAt ?? sample.t
       }
@@ -291,9 +294,13 @@ export class SpeedTracker {
     if (input !== undefined) {
       const forwarded = Math.max(0, input - cacheRead)
       // Carried outside RunState because the next `beginStep` may replace it.
-      if (forwarded > 0) this.lastForwarded.set(sessionID, forwarded)
-      st.settledPrefillTokens = forwarded
-      if (st.lastPrefillTokens === 0) st.lastPrefillTokens = forwarded
+      // A fully-cached step forwards nothing: banking 0 would read as a live
+      // `0/…` bar, so only a positive count settles.
+      if (forwarded > 0) {
+        this.lastForwarded.set(sessionID, forwarded)
+        st.settledPrefillTokens = forwarded
+        if (st.lastPrefillTokens === 0) st.lastPrefillTokens = forwarded
+      }
       // Keep the live prefill rate when we measured one. TTFT is only a
       // fallback — it includes queue wait and is exactly the end-of-turn
       // number this plugin exists to replace.
@@ -307,6 +314,11 @@ export class SpeedTracker {
       st.settledGenTokens = output + reasoning
       st.tokensEstimated = false
     }
+
+    // The step's call is over, so its prefill is over — even when usage never
+    // arrived or no token ever flipped the phase. Without this the meter keeps
+    // displaying the finished step's prefill until the next step begins.
+    if (st.phase === "prefill") st.phase = "generate"
   }
 
   finish(sessionID: string, now: number): void {

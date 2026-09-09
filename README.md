@@ -69,7 +69,7 @@ absent.
 | Throughput | `decode` and `prefill` tok/s, each on its own permanent line with its since-boot average behind it, a 60-second sparkline, admitted req/s |
 | Server | live serving statistics, always in this order: `gpu` (0% is a reading, not a missing number), `running N · M waiting`, since-boot `tokens` in/out and `requests`, last request's `messages` and `tool calls` |
 | Prefix cache | share of billed prompt tokens restored from cache, share of requests with a hit, `hot` and `ssd` tiers gauged against their own caps |
-| Memory | heading gauge `Memory ▮▮▮▮▮▮▮░░░ 79% of 117G wired` when a ceiling is known, else a plain `footprint` row; MLX in-use vs pool, free RAM and peak, ANE bytes, n-gram table |
+| Memory | a bar row `▮▮▮▮▮▮░░░░ 63% of 117G wired` against the declared ceiling when one is known, else a plain `footprint` row; MLX in-use vs pool, free RAM and peak, ANE bytes, n-gram table |
 | Speculative Decoding | per-draft acceptance as gauge and percent, accepted per round, verify round time vs GPU→CPU sync, `gate off` when the runtime disabled speculation |
 | Model & sampling | what model this is and how it sampled: `model`, `kv-quant`, `context` (exact digits), `spec mtp head · <arch>`, then what the last request ran with: `temp 1.00 · p 0.95 k 20`, `max out 64000 · launch default`, `stream off`, `route responses` |
 | Server log | the log file, its size and last write, with the feed state (`· live` dim when well, `· unreachable` red when dark) as an aside on the heading |

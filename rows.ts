@@ -378,12 +378,22 @@ function cacheRows(
 }
 
 /**
- * Allocator and system memory. With a declared wired ceiling the footprint is the
- * section heading's gauge (`memoryGauge`); without one it is a plain bytes row.
+ * Allocator and system memory. With a declared wired ceiling the footprint is
+ * a bar row of its own, first in the section; without one it is a plain bytes
+ * row. The bar sits on a row rather than the heading so the heading never
+ * changes width while the numbers move.
  */
 function memoryRows(s: ServiceStats, input: PanelInput): SidebarRow[] {
   const rows: SidebarRow[] = []
-  if (s.memGb !== null && wiredCeilingGb(input.wiredLimitGb ?? null) === null) {
+  const ceiling = wiredCeilingGb(input.wiredLimitGb ?? null)
+  if (s.memGb !== null && ceiling !== null) {
+    const fraction = ratio(s.memGb, ceiling) ?? 0
+    const cells = input.ratioCells ?? 0
+    const pct = Math.round(fraction * 100)
+    // No label: the bar is the section's headline number, in the exact words
+    // the heading gauge used to carry.
+    rows.push({ label: "", value: `${gauge(fraction, cells)}${pct}% of ${fmtGib(ceiling)} wired` })
+  } else if (s.memGb !== null) {
     rows.push(row("footprint", `${s.memGb.toFixed(1)}G`))
   }
   // MLX's allocator holds bytes in use plus a reclaimable pool not yet returned.
@@ -577,20 +587,6 @@ export function clip(text: string, cells: number): string {
   return chars.length <= cells ? text : `${chars.slice(0, cells - 1).join("")}…`
 }
 
-/**
- * The heading-line gauge for `Memory`: footprint against the declared wired
- * ceiling. null when there is no ceiling; the footprint is then a plain row.
- */
-export function memoryGauge(input: PanelInput): { note: string; noteBright: true } | null {
-  const s = input.service
-  const ceiling = wiredCeilingGb(input.wiredLimitGb ?? null)
-  if (s === null || s.memGb === null || ceiling === null) return null
-  const fraction = ratio(s.memGb, ceiling) ?? 0
-  const cells = input.ratioCells ?? 0
-  const pct = Math.round(fraction * 100)
-  return { note: `${gauge(fraction, cells)}${pct}% of ${fmtGib(ceiling)} wired`, noteBright: true as const }
-}
-
 // ---------------------------------------------------------------------------
 // Assembly
 // ---------------------------------------------------------------------------
@@ -679,7 +675,7 @@ export function buildSections(input: PanelInput, enabled: readonly SectionName[]
   for (const name of enabled) {
     const rows = name === "turn" ? turn : rowsFor(name, derived)
     if (rows.length === 0) continue
-    const note = name === "memory" ? memoryGauge(derived) : name === "log" ? logNote(derived.link) : null
+    const note = name === "log" ? logNote(derived.link) : null
     sections.push({
       name,
       title: SECTION_TITLES[name],

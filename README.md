@@ -40,8 +40,8 @@ the numbers move. Every slot draws in every shape, zero-filled — nothing pops
 in or out mid-turn:
 
 ```
-prefill ███░░░░░░░ 12,400/~48,000 · 1600 t/s · ~22s left   ← prefilling
-prefill 8,192 tok · 6827 t/s                              ← prefilling, no yardstick yet
+prefill ███░░░░░░░ 12,400/48,000 · 1600 t/s · ~22s left   ← prefilling
+prefill 8,192 tok · 6827 t/s                              ← prefilling, server silent on the total
 1,833 tok · decode 24.0 t/s · prefill 10.0k t/s           ← decoding
 0 tok · decode 0.0 t/s · prefill 0.0 t/s                  ← quiet zeros between steps
 ```
@@ -50,12 +50,13 @@ prefill 8,192 tok · 6827 t/s                              ← prefilling, no ya
   form (`10.2k t/s`).
 - `~` marks a count estimated from streamed bytes rather than reported by the
   server.
-- The prefill bar's denominator is the previous step's forwarded token count
-  (`prompt − cached`), because mlx-serve publishes `prefill_tokens_live` but the
-  total only arrives in `usage` after the step. When this turn forwards more than
-  the last one the bar saturates and reads `past last turn`. With no previous
-  step, or `footerBarCells: 0`, the line is the plain rate shape. A fully-cached
-  step forwards nothing and settles nothing: it reads as waiting, never `0/…`.
+- The prefill bar's denominator is the real target: the server publishes
+  `prefill_tokens_expected` (the post-cache tail it is about to forward)
+  alongside the live count, on the same scale. No estimate, no `~`, nothing
+  carried over from a previous step. A server that does not report it — older
+  builds, the bypass engines — draws the plain rate shape instead of a bar.
+  A fully-cached step forwards nothing and settles nothing: it reads as
+  waiting, never `0/…`.
 - A finished step retires the prefill phase even when no token ever flipped it,
   so the meter cannot freeze on a finished prefill between steps.
 

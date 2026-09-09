@@ -3,6 +3,8 @@ export type Phase = "idle" | "prefill" | "generate" | "frozen"
 export interface MetricsSample {
   readonly t: number
   readonly prefillLive: number
+  /** Total tokens the in-flight prefill will forward (`prefill_tokens_expected`); 0 when none is running. */
+  readonly prefillExpected: number
   readonly genLive: number
   readonly prefilling: boolean
   readonly running: boolean
@@ -18,13 +20,12 @@ export interface SpeedValue {
   readonly phase: Phase
   readonly prefillTokens: number | null
   /**
-   * Tokens the previous step of this session actually forwarded through the
-   * model (`prompt - cached`). `prefill_tokens_live` says how far along we are
-   * but never how far there is to go — that only arrives in `usage`, after the
-   * step finishes — so the last settled count is the best available yardstick
-   * for a progress bar. null on a session's first prefill.
+   * Total tokens the running prefill will forward, straight from the server's
+   * `prefill_tokens_expected` gauge (the post-cache tail, on the same scale as
+   * `prefillTokens`). null when the server reports none — then the meter draws
+   * the rate shape instead of inventing a denominator.
    */
-  readonly prefillBaseline: number | null
+  readonly prefillExpected: number | null
   readonly prefillTps: number | null
   readonly genTokens: number
   readonly genTps: number | null
@@ -75,6 +76,7 @@ interface RunState {
   genMetricSamples: TokenSample[]
   genLiveOrigin: number | null
   lastPrefillTokens: number
+  lastPrefillExpected: number
   lastPrefillTps: number | null
   settledPrefillTokens: number | null
   settledGenTokens: number | null
@@ -163,8 +165,6 @@ function bankStep(st: RunState, bytesPerToken: number): void {
 
 export class SpeedTracker {
   private readonly runs = new Map<string, RunState>()
-  /** Last forwarded prompt-token count per session, settled from `usage`. */
-  private readonly lastForwarded = new Map<string, number>()
   private readonly config: SpeedConfig
 
   constructor(config: SpeedConfig = DEFAULT_CONFIG) {
@@ -202,6 +202,7 @@ export class SpeedTracker {
     running.startedAt = now
     running.prefillSamples = []
     running.lastPrefillTokens = 0
+    running.lastPrefillExpected = 0
     running.lastPrefillTps = null
     running.settledPrefillTokens = null
     running.tokensEstimated = true
@@ -229,6 +230,9 @@ export class SpeedTracker {
     if (!st || st.phase === "idle" || st.phase === "frozen") return
     st.metricsOk = true
     st.runningCount = sample.runningCount ?? (sample.running ? 1 : 0)
+    // The server's real target for the running prefill; 0/absent while idle.
+    // Latest wins: the gauge is set once per prefill and cleared at its end.
+    if (sample.prefillExpected > 0) st.lastPrefillExpected = sample.prefillExpected
 
     if (st.genLiveOrigin === null) st.genLiveOrigin = sample.genLive
 
@@ -293,11 +297,9 @@ export class SpeedTracker {
 
     if (input !== undefined) {
       const forwarded = Math.max(0, input - cacheRead)
-      // Carried outside RunState because the next `beginStep` may replace it.
       // A fully-cached step forwards nothing: banking 0 would read as a live
       // `0/…` bar, so only a positive count settles.
       if (forwarded > 0) {
-        this.lastForwarded.set(sessionID, forwarded)
         st.settledPrefillTokens = forwarded
         if (st.lastPrefillTokens === 0) st.lastPrefillTokens = forwarded
       }
@@ -333,7 +335,6 @@ export class SpeedTracker {
 
   evict(sessionID: string): void {
     this.runs.delete(sessionID)
-    this.lastForwarded.delete(sessionID)
   }
 
   hasActive(now = Date.now()): boolean {
@@ -386,6 +387,7 @@ export class SpeedTracker {
     if (st.phase === "prefill" && st.turnGenTokens === 0 && st.lastGenTps === null) genTps = null
 
     const prefillTokens = st.settledPrefillTokens ?? (st.lastPrefillTokens > 0 ? st.lastPrefillTokens : null)
+    const prefillExpected = st.lastPrefillExpected > 0 ? st.lastPrefillExpected : null
     const prefillTps =
       st.lastPrefillTps ??
       (st.phase === "prefill" ? rateFromSamples(st.prefillSamples, now, PREFILL_WINDOW_MS) : null)
@@ -394,7 +396,7 @@ export class SpeedTracker {
       return {
         phase: "prefill",
         prefillTokens: null,
-        prefillBaseline: this.lastForwarded.get(sessionID) ?? null,
+        prefillExpected: null,
         prefillTps: null,
         genTokens: 0,
         genTps: null,
@@ -407,7 +409,7 @@ export class SpeedTracker {
     return {
       phase: st.phase,
       prefillTokens,
-      prefillBaseline: this.lastForwarded.get(sessionID) ?? null,
+      prefillExpected,
       prefillTps,
       genTokens,
       genTps,
@@ -423,7 +425,6 @@ export class SpeedTracker {
       if (this.runs.size <= MAX_TRACKED_RUNS) return
       if (st.phase === "prefill" || st.phase === "generate") continue
       this.runs.delete(sessionID)
-      this.lastForwarded.delete(sessionID)
     }
   }
 }
@@ -450,6 +451,7 @@ function emptyRun(): RunState {
     genMetricSamples: [],
     genLiveOrigin: null,
     lastPrefillTokens: 0,
+    lastPrefillExpected: 0,
     lastPrefillTps: null,
     settledPrefillTokens: null,
     settledGenTokens: null,
@@ -469,6 +471,7 @@ function finite(value: number | undefined): number | undefined {
 export interface MetricsJson {
   gauges?: {
     prefill_tokens_live?: number
+    prefill_tokens_expected?: number
     generation_tokens_live?: number
     requests_prefilling?: number
     requests_running?: number
@@ -481,6 +484,7 @@ export function parseMetricsJson(json: MetricsJson, t = Date.now()): MetricsSamp
   return {
     t,
     prefillLive: Number(g.prefill_tokens_live) || 0,
+    prefillExpected: Number(g.prefill_tokens_expected) || 0,
     genLive: Number(g.generation_tokens_live) || 0,
     prefilling: (Number(g.requests_prefilling) || 0) > 0,
     running: running > 0,

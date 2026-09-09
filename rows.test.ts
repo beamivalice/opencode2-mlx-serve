@@ -52,7 +52,7 @@ function speed(overrides: Partial<SpeedValue> = {}): SpeedValue {
   return {
     phase: "generate",
     prefillTokens: 128_000,
-    prefillBaseline: null,
+    prefillExpected: null,
     prefillTps: 4200,
     genTokens: 1400,
     genTps: 24.6,
@@ -225,11 +225,11 @@ test("a phase that ends keeps its Throughput line", () => {
   )
 })
 
-test("the prefill bar fills against the yardstick, saturates past it", () => {
+test("the prefill bar fills against the target, saturates past it", () => {
   assert.equal(progressBar(0.5, 12), "██████░░░░░░")
   assert.equal(progressBar(0, 4), "░░░░")
   assert.equal(progressBar(null, 4), "░░░░", "unknown progress is an empty bar, never a half one")
-  assert.equal(progressBar(2, 4), "████", "a turn bigger than the yardstick saturates instead of throwing")
+  assert.equal(progressBar(2, 4), "████", "a turn bigger than the target saturates instead of throwing")
   assert.equal(progressBar(0.3, 0), "", "zero cells means no bar at all")
 })
 
@@ -238,7 +238,7 @@ test("prefill becomes a progress bar with speed and x/y tokens", () => {
     speed({
       phase: "prefill",
       prefillTokens: 12_400,
-      prefillBaseline: 48_000,
+      prefillExpected: 48_000,
       prefillTps: 1_600,
       genTps: null,
       ttftMs: null,
@@ -247,24 +247,24 @@ test("prefill becomes a progress bar with speed and x/y tokens", () => {
     12,
   )
   assert.deepEqual(text(rows), [
-    "prefill ███░░░░░░░░░ 12.4k/~48.0k",
+    "prefill ███░░░░░░░░░ 12.4k/48.0k",
     "1600 t/s · ~22s left",
   ])
 })
 
 test("the bar's denominator is marked as an estimate", () => {
   const rows = turnRows(
-    speed({ phase: "prefill", prefillTokens: 1_000, prefillBaseline: 4_000, prefillTps: null, genTps: null, ttftMs: null }),
+    speed({ phase: "prefill", prefillTokens: 1_000, prefillExpected: 4_000, prefillTps: null, genTps: null, ttftMs: null }),
     1,
     8,
   )
-  assert.deepEqual(text(rows), ["prefill ██░░░░░░ 1.0k/~4.0k", "measuring"])
+  assert.deepEqual(text(rows), ["prefill ██░░░░░░ 1.0k/4.0k", "measuring"])
 })
 
-test("no yardstick yet: the prefill line stays a plain rate", () => {
-  const firstTurn = speed({ phase: "prefill", prefillTokens: 8_192, prefillBaseline: null, genTps: null, ttftMs: null })
+test("no target yet: the prefill line stays a plain rate", () => {
+  const firstTurn = speed({ phase: "prefill", prefillTokens: 8_192, prefillExpected: null, genTps: null, ttftMs: null })
   assert.deepEqual(text(turnRows(firstTurn, 1, 12)), ["prefill 4200 t/s · 8.2k tok"])
-  const cold = speed({ phase: "prefill", prefillTokens: null, prefillBaseline: null, prefillTps: null, genTps: null, ttftMs: null })
+  const cold = speed({ phase: "prefill", prefillTokens: null, prefillExpected: null, prefillTps: null, genTps: null, ttftMs: null })
   assert.deepEqual(text(turnRows(cold, 1, 12)), ["prefill waiting · 1m02s"], "nothing to measure, so nothing is invented")
 })
 
@@ -290,22 +290,22 @@ test("the footer decode line always shows all three slots", () => {
 test("the footer prefill shapes zero-fill every slot", () => {
   assert.equal(
     footerLabel(
-      speed({ phase: "prefill", prefillTokens: 12_400, prefillBaseline: 48_000, prefillTps: 1_600, genTps: null, ttftMs: null }),
+      speed({ phase: "prefill", prefillTokens: 12_400, prefillExpected: 48_000, prefillTps: 1_600, genTps: null, ttftMs: null }),
       { barCells: 10 },
     ),
-    "prefill ███░░░░░░░ 12,400/~48,000 · 1600 t/s · ~22s left",
+    "prefill ███░░░░░░░ 12,400/48,000 · 1600 t/s · ~22s left",
   )
   assert.equal(
     footerLabel(
-      speed({ phase: "prefill", prefillTokens: null, prefillBaseline: 48_000, prefillTps: null, genTps: null, ttftMs: null }),
+      speed({ phase: "prefill", prefillTokens: null, prefillExpected: 48_000, prefillTps: null, genTps: null, ttftMs: null }),
       { barCells: 10 },
     ),
-    "prefill ░░░░░░░░░░ 0/~48,000 · 0.0 t/s · measuring",
+    "prefill ░░░░░░░░░░ 0/48,000 · 0.0 t/s · measuring",
   )
   assert.equal(
-    footerLabel(speed({ phase: "prefill", prefillTokens: null, prefillBaseline: null, prefillTps: null, genTps: null, ttftMs: null })),
+    footerLabel(speed({ phase: "prefill", prefillTokens: null, prefillExpected: null, prefillTps: null, genTps: null, ttftMs: null })),
     "prefill 0 tok · 0.0 t/s",
-    "no yardstick, no bar — but the same two slots",
+    "no target, no bar — but the same two slots",
   )
 })
 
@@ -744,13 +744,13 @@ test("the Turn section draws the prefill bar buildSections was given cells for",
   const prefilling = speed({
     phase: "prefill",
     prefillTokens: 12_400,
-    prefillBaseline: 48_000,
+    prefillExpected: 48_000,
     prefillTps: 1_600,
     genTps: null,
     ttftMs: null,
   })
   assert.deepEqual(section("turn", input({ speed: prefilling, barCells: 18 })), [
-    "prefill █████░░░░░░░░░░░░░ 12.4k/~48.0k",
+    "prefill █████░░░░░░░░░░░░░ 12.4k/48.0k",
     "1600 t/s · ~22s left",
   ])
 })

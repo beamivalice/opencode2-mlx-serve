@@ -23,6 +23,7 @@ test("parseMetricsJson reads live gauges", () => {
     {
       gauges: {
         prefill_tokens_live: 8192,
+        prefill_tokens_expected: 48000,
         generation_tokens_live: 100,
         requests_prefilling: 1,
         requests_running: 1,
@@ -31,8 +32,10 @@ test("parseMetricsJson reads live gauges", () => {
     1_000,
   )
   assert.equal(sample.prefillLive, 8192)
+  assert.equal(sample.prefillExpected, 48000, "the bar's real target rides the same feed")
   assert.equal(sample.prefilling, true)
   assert.equal(sample.running, true)
+  assert.equal(parseMetricsJson({ gauges: {} }, 1_000).prefillExpected, 0, "old servers omit it: zero, never NaN")
 })
 
 test("a fully-cached step never draws a 0/xx bar", () => {
@@ -218,7 +221,7 @@ test("the footer line is turn stats, and holds no memory figure", () => {
     footerLabel({
       phase: "prefill",
       prefillTokens: null,
-      prefillBaseline: null,
+      prefillExpected: null,
       prefillTps: null,
       genTokens: 0,
       genTps: null,
@@ -233,7 +236,7 @@ test("the footer line is turn stats, and holds no memory figure", () => {
     footerLabel({
       phase: "generate",
       prefillTokens: 8_192,
-      prefillBaseline: null,
+      prefillExpected: null,
       prefillTps: 410.4,
       genTokens: 312,
       genTps: 51.4,
@@ -288,62 +291,58 @@ test("alone, the turn still uses the server's own token counter", () => {
   assert.equal(v.genTps, 100, "one client: the counter is ours, and it beats a byte estimate")
 })
 
-test("prefill baseline is the last settled forwarded count", () => {
+test("the prefill target is the server gauge, never settled usage", () => {
   const tracker = new SpeedTracker()
-  // First step of a session: nothing settled, so there is no yardstick yet.
   tracker.beginRun("a", 0)
   tracker.beginStep("a", "m1", 0)
   tracker.pushDelta("a", "hello", 200, "m1")
-  assert.equal(tracker.value("a", 200)?.prefillBaseline, null, "first prefill has no baseline")
-
-  // It forwarded 50k prompt tokens of which 48k came back from the prefix cache.
+  assert.equal(tracker.value("a", 200)?.prefillExpected, null, "no gauge reading yet, no target")
+  // Settled usage does NOT become a target: only the gauge does.
   tracker.finishStep("a", "m1", { input: 50_000, output: 100, cacheRead: 48_000 }, 1_000)
-  tracker.finish("a", 1_000)
-
-  // Second step: the meter must remember 2k forwarded tokens across the new run.
   tracker.beginStep("a", "m2", 2_000)
-  const during = tracker.value("a", 2_100)
-  assert.equal(during?.phase, "prefill")
-  assert.equal(during?.prefillBaseline, 2_000, "the yardstick carries across beginRun")
+  assert.equal(tracker.value("a", 2_100)?.prefillExpected, null, "a settled 2k is not a denominator")
+  tracker.applyMetrics("a", { t: 2_200, prefillLive: 500, prefillExpected: 48_000, genLive: 100, prefilling: true, running: true, runningCount: 1 })
+  assert.equal(tracker.value("a", 2_200)?.prefillExpected, 48_000, "the gauge reading is the target")
 })
 
-test("evicting a session forgets its prefill baseline", () => {
+test("a new step starts with no target until the gauge speaks", () => {
   const tracker = new SpeedTracker()
   tracker.beginRun("a", 0)
   tracker.beginStep("a", "m1", 0)
+  tracker.applyMetrics("a", { t: 500, prefillLive: 1_000, prefillExpected: 9_000, genLive: 0, prefilling: true, running: true, runningCount: 1 })
+  assert.equal(tracker.value("a", 500)?.prefillExpected, 9_000)
   tracker.finishStep("a", "m1", { input: 9_000, output: 10, cacheRead: 4_000 }, 1_000)
-  tracker.evict("a")
-  tracker.beginRun("a", 2_000)
   tracker.beginStep("a", "m2", 2_000)
-  assert.equal(tracker.value("a", 2_100)?.prefillBaseline, null, "a deleted session starts over")
+  assert.equal(tracker.value("a", 2_100)?.prefillExpected, null, "the old target does not leak into the new prefill")
+  tracker.evict("a")
+  tracker.beginRun("a", 3_000)
+  tracker.beginStep("a", "m3", 3_000)
+  assert.equal(tracker.value("a", 3_100)?.prefillExpected, null, "a deleted session starts over")
 })
 
-test("the footer prefill line becomes a progress bar against the last turn", () => {
+test("the footer prefill bar fills against the server's expected total", () => {
   const t = new SpeedTracker()
   t.beginRun("a", 0)
   t.beginStep("a", "m1", 0)
-  t.finishStep("a", "m1", { input: 48_000, output: 40, cacheRead: 44_000 }, 5_000) // forwarded 4k last turn
-  t.finish("a", 5_000)
-
-  t.beginStep("a", "m2", 6_000)
   for (let chunk = 1024; chunk <= 12_288; chunk += 1024) {
     t.applyMetrics("a", {
-      t: 6_000 + chunk / 8,
+      t: chunk / 8,
       prefillLive: chunk,
-      genLive: 1_000,
+      prefillExpected: 48_000,
+      genLive: 0,
       prefilling: true,
       running: true,
       runningCount: 1,
     })
   }
-  const line = footerLabel(t.value("a", 7_600), { barCells: 18 })
+  const line = footerLabel(t.value("a", 1_600), { barCells: 18 })
   assert.ok(line !== null)
-  assert.match(line, /^prefill [█░]{18} 12,288\/~4,000 · /, "bar, then x/y tokens with the yardstick marked as an estimate")
+  assert.match(line, /^prefill [█░]{18} 12,288\/48,000 · /, "bar, then live over the real total")
   assert.equal(line.includes("Memory"), false, "no memory figure in a turn readout")
-  assert.equal([...line].filter((c) => c === "█").length, 18, "12,288 forwarded past a 4,000 yardstick saturates the bar")
+  assert.equal([...line].filter((c) => c === "█").length, 5, "12,288 of 48,000 fills five cells")
 })
 
-test("no yardstick, no bar: the first prefill stays a rate line", () => {
+test("no expected gauge, no bar: the prefill stays a rate line", () => {
   const t = new SpeedTracker()
   t.beginRun("a", 0)
   t.beginStep("a", "m1", 0)
@@ -351,7 +350,7 @@ test("no yardstick, no bar: the first prefill stays a rate line", () => {
   const line = footerLabel(t.value("a", 1_200), { barCells: 18 })
   assert.equal(line, "prefill 8,192 tok · 6827 t/s")
   assert.equal(progressBar(0.5, 6), "███░░░", "the bar primitive the footer draws with")
-  assert.equal(footerLabel(t.value("a", 1_200), { barCells: 0 }), line, "barCells 0 draws the same facts as a saturated bar would")
+  assert.equal(footerLabel(t.value("a", 1_200), { barCells: 0 }), line, "barCells 0 keeps the rate shape")
 })
 
 test("with two clients the token count comes from our bytes too, not the machine's", () => {

@@ -243,25 +243,24 @@ export function turnRows(speed: SpeedValue | null, inflight = 1, barCells = 0): 
 }
 
 /**
- * `prefill ████████░░░░░░░░ 12.4k/~48.0k` plus `1.6k t/s · ~22s left`.
+ * `prefill ████████░░░░░░░░ 12.4k/48.0k` plus `1.6k t/s · ~22s left`.
  *
- * The denominator is the previous step's forwarded count: mlx-serve publishes
- * how far prefill has got (`prefill_tokens_live`) but the total only lands in
- * `usage` after the step. Hence the `~`.
+ * The denominator is the server's real target for the running prefill
+ * (`prefill_tokens_expected`, the post-cache tail) — no estimate, no `~`.
  */
 function prefillBar(speed: SpeedValue, cells: number): SidebarRow[] | null {
   if (cells <= 0) return null
   const live = speed.prefillTokens
-  const base = speed.prefillBaseline
+  const base = speed.prefillExpected
   // No denominator, no bar: an empty bar would read as "0% of a known total".
   if (base === null || base <= 0 || live === null) return null
+  const tps = speed.prefillTps ?? 0
   const remaining = base - live
-  const left = speed.prefillTps !== null && remaining > 0 ? Math.round(remaining / speed.prefillTps) : null
-  const note =
-    speed.prefillTps === null ? "measuring" : left === null ? "· at last turn's size" : `· ~${left}s left`
+  const left = tps > 0 && remaining > 0 ? Math.round(remaining / tps) : null
+  const note = tps <= 0 ? "measuring" : left === null ? "· done" : `· ~${left}s left`
   return [
-    row("prefill", `${progressBar(live / base, cells)} ${fmtCount(live)}/~${fmtCount(base)}`),
-    row("", note.startsWith("measuring") ? note : `${fmtRate(speed.prefillTps ?? 0)} t/s ${note}`.trim()),
+    row("prefill", `${progressBar(live / base, cells)} ${fmtCount(live)}/${fmtCount(base)}`),
+    row("", note.startsWith("measuring") ? note : `${fmtRate(tps)} t/s ${note}`.trim()),
   ]
 }
 
@@ -705,7 +704,7 @@ export function buildSections(input: PanelInput, enabled: readonly SectionName[]
 export function footerLabel(speed: SpeedValue | null, options: FooterOptions = {}): string | null {
   if (!speed) return null
   if (speed.phase === "prefill") {
-    const base = speed.prefillBaseline
+    const base = speed.prefillExpected
     if ((options.barCells ?? 0) > 0 && base !== null && base > 0) return prefillBarLine(speed, base, options.barCells ?? 0)
     return prefillRateLine(speed)
   }
@@ -719,7 +718,7 @@ export interface FooterOptions {
   readonly barCells?: number
 }
 
-/** Prefill with a yardstick: bar, live count, rate and eta — every slot always. */
+/** Prefill with a real target: bar, live count, rate and eta — every slot always. */
 function prefillBarLine(speed: SpeedValue, base: number, cells: number): string {
   const live = speed.prefillTokens ?? 0
   const tps = speed.prefillTps ?? 0
@@ -729,12 +728,12 @@ function prefillBarLine(speed: SpeedValue, base: number, cells: number): string 
     tps > 0
       ? base - live > 0
         ? `~${Math.max(1, Math.round((base - live) / tps))}s left`
-        : "past last turn"
+        : "done"
       : "measuring"
-  return `prefill ${progressBar(live / base, cells)} ${fmtExact(live)}/~${fmtExact(base)} · ${fmtRate(tps)} t/s · ${eta}`
+  return `prefill ${progressBar(live / base, cells)} ${fmtExact(live)}/${fmtExact(base)} · ${fmtRate(tps)} t/s · ${eta}`
 }
 
-/** Prefill without a yardstick: tokens and rate, zero-filled like the bar. */
+/** Prefill without a reported target: tokens and rate, zero-filled like the bar. */
 function prefillRateLine(speed: SpeedValue): string {
   const live = speed.prefillTokens ?? 0
   return `prefill ${fmtExact(live)} tok · ${fmtRate(speed.prefillTps ?? 0)} t/s`

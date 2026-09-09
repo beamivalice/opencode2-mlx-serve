@@ -59,9 +59,10 @@ prefill █████░░░░░░░░░░░░░ 12,288/~48,000 ·
 
 ## Panel sections
 
-Only sections with data are drawn, in the order given by `sections`. The `feed`
-row in Server log draws even when everything else is empty, so an unreachable
-server is visible rather than absent.
+Only sections with data are drawn, in the order given by `sections`. The Server
+log heading names the feed state (`· live`, `· unreachable`, …) even when
+everything else is empty, so an unreachable server is visible rather than
+absent.
 
 | Section | Rows |
 | --- | --- |
@@ -70,8 +71,8 @@ server is visible rather than absent.
 | Prefix cache | share of billed prompt tokens restored from cache, share of requests with a hit, `hot` and `ssd` tiers gauged against their own caps |
 | Memory | heading gauge `Memory ▮▮▮▮▮▮▮░░░ 79% of 117G wired` when a ceiling is known, else a plain `footprint` row; MLX in-use vs pool, free RAM and peak, ANE bytes, n-gram table |
 | Speculative Decoding | per-draft acceptance as gauge and percent, accepted per round, verify round time vs GPU→CPU sync, `gate off` when the runtime disabled speculation |
-| Sampling | what the last request ran with: `temp 1.00 · p 0.95 k 20`, `max out 64000 · launch default`, `stream off`, `route responses` |
-| Server log | what this panel is about and whether it answers: `model`, `kv-quant`, `context` (exact digits), `spec mtp head · <arch>`, then `feed live` / `--metrics off` / `unreachable` / `401 unauthorized`, the log file, its size and last write |
+| Model & sampling | what model this is and how it sampled: `model`, `kv-quant`, `context` (exact digits), `spec mtp head · <arch>`, then what the last request ran with: `temp 1.00 · p 0.95 k 20`, `max out 64000 · launch default`, `stream off`, `route responses` |
+| Server log | the log file, its size and last write, with the feed state (`· live` dim when well, `· unreachable` red when dark) as an aside on the heading |
 | Turn (opt-in) | the footer meter's numbers as rows, prefill bar included |
 | Attach | the plugin's own integration failures; appears on its own whenever a host API refused, and can also be listed in `sections` |
 
@@ -106,7 +107,7 @@ admitted  0.00 req/s
 
 `0.0` means the counter did not move in the window, not that it measured a slow
 phase; the reason the window is empty (idle server, `--metrics off`, unreachable)
-is in the `feed` row of Server log. The sidebar renders each row by its label, so
+is in the Server log heading. The sidebar renders each row by its label, so
 a line whose number merely changed is updated in place rather than rebuilt.
 
 ### Gauges, bars, sparklines

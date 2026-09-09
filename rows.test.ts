@@ -17,7 +17,7 @@ import {
 } from "./rows.ts"
 import { HOT_TIER_LINE, SSD_TIER_LINE, CHAT_LINE, GATED_LINE, LIVE_MODELS, LIVE_PROPS, MTP_LINE, RESPONSES_LINE, feed, raw } from "./fixtures.ts"
 import type { LogStatus, Observed } from "./logtail.ts"
-import type { SamplingStats, ServiceStats } from "./stats.ts"
+import type { Link, SamplingStats, ServiceStats } from "./stats.ts"
 import type { SpeedValue } from "./tracker.ts"
 
 const NOW = 1_800_000_000_000
@@ -98,7 +98,7 @@ const section = (name: string, i: PanelInput = input()) =>
 
 // --- header ----------------------------------------------------------------
 
-test("the feed status is one row, not a title", () => {
+test("the feed status is a heading aside, not a row", () => {
   assert.deepEqual(feedStatus(service().link), { value: "live", tone: "live" })
   const link = (which: "disabled" | "down" | "unauthorized" | "unknown") => {
     const t = new ServiceTracker()
@@ -417,8 +417,8 @@ test("Server shows load, then the serving totals", () => {
     "running 1 · 0 waiting",
     "tokens 347.3k in · 3.3k out",
     "requests 15 ok · 0 cancelled",
-    "messages req 127",
-    "tool calls 68 · this session",
+    "messages 127",
+    "tool calls 68",
   ])
 })
 
@@ -428,10 +428,10 @@ test("Server stops reciting the model card", () => {
   assert.equal(lines.some((l) => /layers/.test(l)), false, "layer count never changes while it runs")
   assert.equal(lines.some((l) => /moe/.test(l)), false, "is_moe explains nothing about this turn")
   assert.ok(lines.every((l) => [...l].length <= 34), `every Server line must fit the sidebar: ${lines.filter((l) => [...l].length > 34).join(" / ")}`)
-  assert.equal(lines.some((l) => l.startsWith("model ")), false, "the model card moved to Server log")
-  const log = section("log")
-  assert.ok(log.includes("model Qwen3.8-Flash-Next"), "the model row moved, it did not leave the panel")
-  assert.ok(log.includes("context 1,048,576"), "exact count, the way the host writes its context meter")
+  assert.equal(lines.some((l) => l.startsWith("model ")), false, "the model card moved to Model & sampling")
+  const card = section("sampling")
+  assert.ok(card.includes("model Qwen3.8-Flash-Next"), "the model row moved, it did not leave the panel")
+  assert.ok(card.includes("context 1,048,576"), "exact count, the way the host writes its context meter")
 })
 
 test("a third client waiting shows on the merged queue line", () => {
@@ -448,8 +448,8 @@ test("Server still names the model when nothing is running", () => {
     "running 0 · 0 waiting",
     "tokens 347.3k in · 3.3k out",
     "requests 15 ok · 0 cancelled",
-    "messages req 127",
-    "tool calls 68 · this session",
+    "messages 127",
+    "tool calls 68",
   ], "an idle GPU reads 0%, it does not take its line")
 })
 
@@ -459,8 +459,8 @@ test("no model loaded: serving statistics draw without the card", () => {
     "running 1 · 0 waiting",
     "tokens 347.3k in · 3.3k out",
     "requests 15 ok · 0 cancelled",
-    "messages req 127",
-    "tool calls 68 · this session",
+    "messages 127",
+    "tool calls 68",
   ])
 })
 
@@ -521,20 +521,23 @@ test("spec modes without a fixed depth report tokens per round", () => {
   assert.deepEqual(section("spec", input({ spec: observed(pld) })), ["accept 1.49 tok/round · 612/410 rounds"])
 })
 
-test("a stale spec line keeps its numbers and says how old they are", () => {
+test("a stale spec line just shows its numbers", () => {
   const old = observed(parseSpecStats(MTP_LINE)!, NOW - 20 * 60_000)
   assert.deepEqual(section("spec", input({ spec: old })), [
     "accept 67.7% · 191/282 drafts",
     "per round 1.14 tok · 168 rounds",
     "round 47ms · sync 2.93ms",
-    "age 20m00s ago",
-  ], "the tally is still true, but it is yesterday's request")
+  ], "a quiet server is not stale data, and the tail already gates dead runs")
 })
 
 // --- sampling --------------------------------------------------------------
 
-test("sampling rows show the params the last request ran with", () => {
+test("the model card and the sampling rows share a section", () => {
   assert.deepEqual(section("sampling"), [
+    "model Qwen3.8-Flash-Next",
+    "kv-quant 8-bit",
+    "context 1,048,576",
+    "spec mtp head · qwen4_exp",
     "temp 1.00 · p 0.95 k 20",
     "max out 64000 · launch default",
   ])
@@ -543,16 +546,26 @@ test("sampling rows show the params the last request ran with", () => {
 test("sampling rows note the route only when it is not chat completions", () => {
   const responses = observed(parseSampling(RESPONSES_LINE)!)
   assert.deepEqual(section("sampling", input({ sampling: responses })), [
+    "model Qwen3.8-Flash-Next",
+    "kv-quant 8-bit",
+    "context 1,048,576",
+    "spec mtp head · qwen4_exp",
     "temp 0.70",
     "max out 4096",
     "route responses",
   ])
 })
 
-test("sampling rows say nothing when the log has no request in it", () => {
-  assert.deepEqual(section("sampling", input({ sampling: null })), [])
+test("the model card holds the section when the log has no request in it", () => {
+  assert.deepEqual(section("sampling", input({ sampling: null })), [
+    "model Qwen3.8-Flash-Next",
+    "kv-quant 8-bit",
+    "context 1,048,576",
+    "spec mtp head · qwen4_exp",
+  ])
+  assert.deepEqual(section("sampling", input({ sampling: null, model: null })), [], "neither card nor request: nothing to draw")
   const nan = observed(parseSampling(CHAT_LINE.replace("temp=1.00", "temp=nan"))!)
-  assert.equal(text(samplingRowsOf(nan))[0], "temp unknown · p 0.95 k 20")
+  assert.equal(text(samplingRowsOf(nan)).find((l) => l.startsWith("temp ")), "temp unknown · p 0.95 k 20")
 })
 
 function samplingRowsOf(s: Observed<SamplingStats> | null): readonly SidebarRow[] {
@@ -563,50 +576,39 @@ function samplingRowsOf(s: Observed<SamplingStats> | null): readonly SidebarRow[
 
 test("log rows point at the file and its freshness", () => {
   assert.deepEqual(logRowsOf(logStatus()), [
-    "feed live",
-    "model Qwen3.8-Flash-Next",
-    "kv-quant 8-bit",
-    "context 1,048,576",
-    "spec mtp head · qwen4_exp",
     "log mlx-serve-11234.log · 302K",
     "last write just now",
   ])
   assert.deepEqual(logRowsOf(logStatus({ error: "no log file", bytes: null, mtimeMs: null })), [
-    "feed live",
-    "model Qwen3.8-Flash-Next",
-    "kv-quant 8-bit",
-    "context 1,048,576",
-    "spec mtp head · qwen4_exp",
     "log mlx-serve-11234.log · no log file",
   ], "the name still shows, so the user knows which file is missing")
   assert.deepEqual(logRowsOf(logStatus({ mtimeMs: NOW - 3_600_000 })), [
-    "feed live",
-    "model Qwen3.8-Flash-Next",
-    "kv-quant 8-bit",
-    "context 1,048,576",
-    "spec mtp head · qwen4_exp",
     "log mlx-serve-11234.log · 302K",
     "last write 60m00s ago",
   ])
   assert.deepEqual(logRowsOf(logStatus({ dropped: 40 * 1024 })), [
-    "feed live",
-    "model Qwen3.8-Flash-Next",
-    "kv-quant 8-bit",
-    "context 1,048,576",
-    "spec mtp head · qwen4_exp",
     "log mlx-serve-11234.log · 302K",
     "last write just now",
     "tail +40K · unread",
   ])
   assert.deepEqual(logRowsOf(null), [
-    "feed live · log tail off",
-    "model Qwen3.8-Flash-Next",
-    "kv-quant 8-bit",
-    "context 1,048,576",
-    "spec mtp head · qwen4_exp",
     "log not tailed · logPath off",
   ], "the feed row answers for the whole section when there is no file to point at")
-  assert.deepEqual(buildSections(input({ log: null, link: "down" }), ["log"])[0].rows[0], { label: "feed", value: "unreachable", tone: "error" }, "a dead server still shows, in red")
+  const down = buildSections(input({ log: null, link: "down", logDisabled: false }), ["log"])[0]
+  assert.equal(down?.note, "· unreachable", "the feed state moved to the heading")
+  assert.equal(down?.noteTone, "error", "a dark feed keeps its alert colour")
+  assert.deepEqual(down?.rows[0], { label: "log", value: "not tailed", note: "· waiting for a server" })
+})
+
+test("the Server log heading names the feed state, dim when live", () => {
+  const heading = (link: Link) => buildSections(input({ link }), ["log"])[0]
+  assert.equal(heading("live")?.note, "· live")
+  assert.equal(heading("live")?.noteTone, undefined, "all is well: gray, not green")
+  assert.equal(heading("live")?.noteBright, undefined)
+  assert.deepEqual([heading("down")?.note, heading("down")?.noteTone], ["· unreachable", "error"])
+  assert.deepEqual([heading("disabled")?.note, heading("disabled")?.noteTone], ["· --metrics off", "warn"])
+  assert.deepEqual([heading("unauthorized")?.note, heading("unauthorized")?.noteTone], ["· 401 unauthorized", "error"])
+  assert.equal(heading("unknown")?.note, "· connecting")
 })
 
 function logRowsOf(log: LogStatus | null): string[] {
@@ -620,7 +622,7 @@ test("buildSections keeps the requested order and drops empty sections", () => {
   const input0 = input({ speed: speed(), sparkCells: 0 })
   const names = (i: PanelInput) => buildSections(i, resolveSections(["log", "turn", "cache", "nosuch"])).map((s) => s.name)
   assert.deepEqual(names(input0), ["log", "turn", "cache"], "order follows the user's list, not ours")
-  assert.deepEqual(names({ ...input0, log: null, service: null }), ["log", "turn"], "only the feed row survives a dead server")
+  assert.deepEqual(names({ ...input0, log: null, service: null }), ["log", "turn"], "the log section still names the feed when the server is dead")
 })
 
 test("every section has a title and every default section draws", () => {

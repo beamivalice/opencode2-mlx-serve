@@ -5,8 +5,8 @@
  *
  *   footer   — turn stats, always on: `~456 tok · decode ~24.0 t/s`, and a
  *              progress bar while a prompt is being prefilled.
- *   sidebar  — server throughput, model, prefix cache, memory, MTP acceptance,
- *              last request's sampling, totals since boot, server log.
+ *   sidebar  — server throughput and serving totals, model card and sampling,
+ *              prefix cache, memory, MTP acceptance, server log.
  *
  * No slash commands: this OpenCode build does not dispatch CLI-plugin commands
  * into the prompt, so everything is always-on or a `cli.json` option.
@@ -651,8 +651,21 @@ const definition = {
       <box>
         <text fg={bright()} wrapMode="none" truncate>
           <b>{props.section.title}</b>
-          {/* Heading gauges use the value colour, same as row gauges. */}
-          {props.section.note === undefined ? null : <span style={{ fg: bright() }}> {props.section.note}</span>}
+          {/* Heading notes are dim asides, unless a second statistic (the Memory
+              gauge) or an alert (a dark feed). */}
+          {props.section.note === undefined ? null : (
+            <span
+              style={{
+                fg: props.section.noteTone
+                  ? toneColor(props.section.noteTone)
+                  : props.section.noteBright
+                    ? bright()
+                    : dim(),
+              }}
+            >
+              {" "}{props.section.note}
+            </span>
+          )}
         </text>
         <For each={props.section.rows} key={(row) => row.label}>
           {(row) => <Row label={row.label} value={row.value} note={row.note} tone={row.tone} noteBright={row.noteBright} />}

@@ -52,8 +52,16 @@ export interface SidebarRow {
 export interface SidebarSection {
   readonly name: SectionName
   readonly title: string
-  /** A gauge that belongs to the section itself, drawn on the heading line in the value colour. */
+  /**
+   * Drawn on the heading line behind the title, carrying its own `· `
+   * separator like a row note. A dim aside unless `noteBright` says it is a
+   * second statistic, or `noteTone` colours it as an alert.
+   */
   readonly note?: string
+  /** Draw the heading note in the value colour, e.g. the Memory gauge. */
+  readonly noteBright?: boolean
+  /** Alert colour for the heading note, e.g. a dark feed. Wins over `noteBright`. */
+  readonly noteTone?: Tone
   readonly rows: readonly SidebarRow[]
 }
 
@@ -93,7 +101,7 @@ export const SECTION_TITLES: Readonly<Record<SectionName, string>> = {
   cache: "Prefix cache",
   memory: "Memory",
   spec: "Speculative Decoding",
-  sampling: "Sampling",
+  sampling: "Model & sampling",
   log: "Server log",
   attach: "Attach",
 }
@@ -140,6 +148,22 @@ export function feedStatus(link: Link | undefined): { value: string; tone: Tone 
       return { value: "401 unauthorized", tone: "error" }
     default:
       return { value: "connecting", tone: "muted" }
+  }
+}
+
+/**
+ * The feed state as the `Server log` heading's aside — `Server log · live` —
+ * instead of a row of its own. A heading is chrome, so the state reads dim
+ * when all is well; a dark feed keeps the alert colour the row had.
+ */
+function logNote(link: Link | undefined): { note: string; noteTone?: Tone } {
+  const status = feedStatus(link)
+  switch (status.tone) {
+    case "live":
+    case "muted":
+      return { note: `· ${status.value}` }
+    default:
+      return { note: `· ${status.value}`, noteTone: status.tone }
   }
 }
 
@@ -385,12 +409,6 @@ function acceptNote(s: SpecStats, drafted: number, cells: number): string {
   return cells > 0 ? `· ${fmtCount(s.accepts)}/${fmtCount(drafted)}` : `· ${fmtCount(s.accepts)}/${fmtCount(drafted)} drafts`
 }
 
-/** `age 20m00s ago` when the newest [spec-stats] line is older than our attention span. */
-function ageRow(observed: Observed<unknown>, now: number): SidebarRow | null {
-  const age = Math.max(0, now - observed.at)
-  return age < 90_000 ? null : row("age", `${fmtDur(age)} ago`)
-}
-
 function specRows(observed: Observed<SpecStats> | null, now: number, cells: number): SidebarRow[] {
   const s = observed?.value
   if (!s || !observed) return []
@@ -423,9 +441,17 @@ function specRows(observed: Observed<SpecStats> | null, now: number, cells: numb
   if (s.runtimeDisabled) {
     rows.push(row("gate", "off", `· ${s.reason ?? "adaptive"} → ${s.adaptive ?? "serial"}`, "warn"))
   }
-  const aged = rows.length > 0 ? ageRow(observed, now) : null
-  if (aged) rows.push(aged)
   return rows
+}
+
+/**
+ * What model this is, how it runs, and how the last request sampled: the model
+ * card first, then what the last request actually ran with. mlx-serve logs
+ * sampling per request, so this is what the server did, not what config says
+ * it should do.
+ */
+function modelSamplingRows(model: ModelStats | null, observed: Observed<SamplingStats> | null, now: number): SidebarRow[] {
+  return [...identityRows(model), ...samplingRows(observed, now)]
 }
 
 /**
@@ -448,8 +474,8 @@ function samplingRows(observed: Observed<SamplingStats> | null, now: number): Si
   if (v.maxTokens !== null) {
     rows.push(row("max out", String(v.maxTokens), v.maxTokensOrigin === null ? undefined : `· ${v.maxTokensOrigin}`))
   }
-  // A request that did not stream is worth naming; the message count is drawn
-  // in Server log beside the token totals.
+  // A request that did not stream is worth naming; the message count rides in
+  // Server beside the token totals.
   if (v.stream === false) rows.push(row("stream", "off"))
   if (v.endpoint !== "chat/completions") {
     rows.push(row("route", v.endpoint, ageNote(observed, now)))
@@ -472,21 +498,21 @@ function totalsRows(s: ServiceStats, sampling: SamplingStats | null): SidebarRow
   const msgs = sampling?.messages
   if (msgs !== null && msgs !== undefined) {
     // Message count of the last prompt, in exact digits.
-    rows.splice(2, 0, { label: "messages", value: `req ${fmtExact(msgs)}` })
+    rows.splice(2, 0, { label: "messages", value: fmtExact(msgs) })
   }
   const toolMsgs = sampling?.toolMsgs
   if (toolMsgs !== null && toolMsgs !== undefined) {
     // Per conversation, not since boot: `tool_msgs` counts the role=="tool"
     // messages the last prompt carried; the feed has no tool-call counter.
-    rows.push({ label: "tool calls", value: fmtCount(toolMsgs), note: "· this session" })
+    rows.push({ label: "tool calls", value: fmtCount(toolMsgs) })
   }
   return rows
 }
 
 /**
  * What is loaded: the model card that used to lead Server. It describes the
- * run rather than the work, so it sits with the feed and the log file in the
- * section that says which server this panel is about. Weight quantization is
+ * run rather than the work, so it leads the sampling section — what model this
+ * is, then how it sampled. Weight quantization is
  * left out (it describes the checkpoint, not the server); KV quantization is
  * kept because it sets the memory cost per token.
  */
@@ -510,25 +536,22 @@ function identityRows(model: ModelStats | null): SidebarRow[] {
 }
 
 /**
- * The panel's last section: which server this is, whether it answers, and
- * which log file is tailed.
+ * The panel's last section: whether the server answers, and which log file is
+ * tailed.
  */
 function logRows(input: PanelInput): SidebarRow[] {
   const log = input.log
-  const status = feedStatus(input.link)
-  const head = row("feed", status.value, log === null && input.link === "live" ? "· log tail off" : undefined, status.tone)
-  const identity = identityRows(input.model)
   // No file: either the operator turned the tail off, or no server has answered
   // yet and there is nothing to say which of the log directory's files is this run's.
   if (!log) {
-    return [head, ...identity, row("log", "not tailed", input.logDisabled === false ? "· waiting for a server" : "· logPath off")]
+    return [row("log", "not tailed", input.logDisabled === false ? "· waiting for a server" : "· logPath off")]
   }
 
   if (log.error !== null || log.bytes === null) {
-    return [head, ...identity, row("log", log.name, `· ${log.error ?? "unreadable"}`, "warn")]
+    return [row("log", log.name, `· ${log.error ?? "unreadable"}`, "warn")]
   }
   const age = log.mtimeMs === null ? null : Math.max(0, input.now - log.mtimeMs)
-  const rows: SidebarRow[] = [head, ...identity, row("log", log.name, `· ${fmtBytes(log.bytes)}`)]
+  const rows: SidebarRow[] = [row("log", log.name, `· ${fmtBytes(log.bytes)}`)]
   if (age !== null) rows.push(row("last write", age < 5_000 ? "just now" : `${fmtDur(age)} ago`))
   if (log.dropped > 0) rows.push(row("tail", `+${fmtBytes(log.dropped)}`, "· unread"))
   return rows
@@ -558,14 +581,14 @@ export function clip(text: string, cells: number): string {
  * The heading-line gauge for `Memory`: footprint against the declared wired
  * ceiling. null when there is no ceiling; the footprint is then a plain row.
  */
-export function memoryGauge(input: PanelInput): { note: string } | null {
+export function memoryGauge(input: PanelInput): { note: string; noteBright: true } | null {
   const s = input.service
   const ceiling = wiredCeilingGb(input.wiredLimitGb ?? null)
   if (s === null || s.memGb === null || ceiling === null) return null
   const fraction = ratio(s.memGb, ceiling) ?? 0
   const cells = input.ratioCells ?? 0
   const pct = Math.round(fraction * 100)
-  return { note: `${gauge(fraction, cells)}${pct}% of ${fmtGib(ceiling)} wired` }
+  return { note: `${gauge(fraction, cells)}${pct}% of ${fmtGib(ceiling)} wired`, noteBright: true as const }
 }
 
 // ---------------------------------------------------------------------------
@@ -627,7 +650,7 @@ function rowsFor(name: SectionName, input: PanelInput): SidebarRow[] {
     case "spec":
       return specRows(input.spec, input.now, input.ratioCells ?? 0)
     case "sampling":
-      return samplingRows(input.sampling, input.now)
+      return modelSamplingRows(input.model, input.sampling, input.now)
     case "log":
       return logRows(input)
     case "attach":
@@ -656,11 +679,11 @@ export function buildSections(input: PanelInput, enabled: readonly SectionName[]
   for (const name of enabled) {
     const rows = name === "turn" ? turn : rowsFor(name, derived)
     if (rows.length === 0) continue
-    const gauge = name === "memory" ? memoryGauge(derived) : null
+    const note = name === "memory" ? memoryGauge(derived) : name === "log" ? logNote(derived.link) : null
     sections.push({
       name,
       title: SECTION_TITLES[name],
-      ...(gauge === null ? {} : { note: gauge.note }),
+      ...(note === null ? {} : note),
       rows,
     })
   }

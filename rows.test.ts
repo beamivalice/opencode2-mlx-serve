@@ -274,16 +274,21 @@ test("barCells 0 keeps the old two-line meter exactly", () => {
 })
 
 test("the footer decode line always shows all three slots", () => {
-  assert.equal(footerLabel(speed({ prefillTps: null })), "1,400 tok · decode 24.6 t/s · prefill 0.0 t/s")
+  assert.equal(footerLabel(speed({ prefillTps: null })), "1,400 tok · decode 24.6 t/s · ttft 430ms")
   assert.equal(
     footerLabel(speed({ genTps: null, prefillTps: 4200 })),
     "1,400 tok · decode 0.0 t/s · prefill 4200 t/s",
     "an unsettled rate reads as zero, not as a missing clause",
   )
   assert.equal(
-    footerLabel(speed({ genTokens: 0, genTps: null, prefillTps: null, tokensEstimated: true })),
+    footerLabel(speed({ genTokens: 0, genTps: null, prefillTps: null, ttftMs: null, tokensEstimated: true })),
     "~0 tok · decode ~0.0 t/s · prefill 0.0 t/s",
     "estimates stay marked, zeros stay visible",
+  )
+  assert.equal(
+    footerLabel(speed({ genTps: null, prefillTps: null, ttftMs: 1_500 })),
+    "1,400 tok · decode 0.0 t/s · ttft 1.50s",
+    "a stream-measured prefill reports its TTFT",
   )
 })
 
@@ -304,8 +309,8 @@ test("the footer prefill shapes zero-fill every slot", () => {
   )
   assert.equal(
     footerLabel(speed({ phase: "prefill", prefillTokens: null, prefillExpected: null, prefillTps: null, genTps: null, ttftMs: null })),
-    "prefill 0 tok · 0.0 t/s",
-    "no target, no bar — but the same two slots",
+    "prefill waiting · 1m02s",
+    "no server metrics: the wait is the only prefill measure, and it counts up",
   )
 })
 

@@ -75,6 +75,50 @@ test("another client's completions do not end our prefill", () => {
   assert.equal(t.value("s1", 2_100)?.phase, "generate", "our own bytes still flip it")
 })
 
+test("step.streamed is the first-token mark, before any delta", () => {
+  const t = new SpeedTracker()
+  t.beginRun("s1", 0)
+  t.beginStep("s1", "m1", 0)
+  t.markStreamed("s1", "m1", 1_500)
+  const v = t.value("s1", 1_500)
+  assert.equal(v?.phase, "generate")
+  assert.equal(v?.ttftMs, 1_500, "the provider's wait is over at the first streamed content")
+  assert.equal(footerLabel(v, { barCells: 10 }), "~0 tok · decode ~0.0 t/s · ttft 1.50s")
+  // A late marker for another message must not touch the running step.
+  t.markStreamed("s1", "m0", 2_000)
+  assert.equal(t.value("s1", 2_000)?.ttftMs, 1_500)
+})
+
+test("a stream-only step measures decode from its own bytes", () => {
+  const t = new SpeedTracker()
+  t.beginRun("s1", 0)
+  t.beginStep("s1", "m1", 0)
+  // A metered step at ~300 t/s. Its last rate must not leak into the next step.
+  t.applyMetrics("s1", { t: 0, prefillLive: 0, prefillExpected: 0, genLive: 1_000, prefilling: false, running: true, runningCount: 1 })
+  t.applyMetrics("s1", { t: 1_000, prefillLive: 0, prefillExpected: 0, genLive: 1_300, prefilling: false, running: true, runningCount: 1 })
+  t.applyMetrics("s1", { t: 2_000, prefillLive: 0, prefillExpected: 0, genLive: 1_600, prefilling: false, running: true, runningCount: 1 })
+  assert.equal(t.value("s1", 2_000)?.genTps, 300)
+  // The next step is not mlx-serve: no metrics sample applies to it.
+  t.beginStep("s1", "m2", 3_000)
+  for (let i = 1; i <= 10; i++) t.pushDelta("s1", "abcdefghij", 3_000 + i * 100, "m2")
+  const v = t.value("s1", 4_000)
+  assert.equal(v?.phase, "generate", "our own bytes flip the phase without a feed")
+  assert.ok(v?.genTps !== null && v.genTps < 100, `byte rate, not the stale 300 t/s: ${v?.genTps}`)
+  assert.equal(v?.tokensEstimated, true, "byte-derived counts stay marked as estimates")
+})
+
+test("a stream-only step settles prefill from TTFT and usage", () => {
+  const t = new SpeedTracker()
+  t.beginRun("s1", 0)
+  t.beginStep("s1", "m1", 0)
+  t.markStreamed("s1", "m1", 2_000)
+  t.finishStep("s1", "m1", { input: 10_000, output: 50 }, 8_000)
+  const v = t.value("s1", 8_000)
+  assert.equal(v?.prefillTokens, 10_000)
+  assert.equal(v?.prefillTps, 5_000, "the API's forwarded count over its own wait")
+  assert.equal(footerLabel(v, { barCells: 10 }), "50 tok · decode 8.3 t/s · prefill 5000 t/s", "the frozen line carries the step's own average decode")
+})
+
 test("prefill phase reports live tokens and rate from metrics chunks", () => {
   const t = new SpeedTracker()
   t.beginRun("s1", 0)
@@ -229,7 +273,7 @@ test("the footer line is turn stats, and holds no memory figure", () => {
       elapsedMs: 4_200,
       tokensEstimated: true,
     }),
-    "prefill 0 tok · 0.0 t/s",
+    "prefill waiting · 4.2s",
   )
 
   assert.equal(

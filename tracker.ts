@@ -206,7 +206,25 @@ export class SpeedTracker {
     running.lastPrefillTps = null
     running.settledPrefillTokens = null
     running.tokensEstimated = true
+    // A new step measures from the stream until this step's own mlx-serve
+    // metrics prove themselves: a remote provider must not inherit the last
+    // metered step's rate, and a metric-less step must not inherit its source.
+    running.metricsOk = false
+    running.lastGenTps = null
     running.frozen = null
+  }
+
+  /**
+   * The provider sent its first streamed content (`session.step.streamed`).
+   * This is the precise end of the API-side wait: TTFT is now, before any
+   * delta has been decoded. Works with or without mlx-serve metrics.
+   */
+  markStreamed(sessionID: string, assistantMessageID: string, now: number): void {
+    const st = this.runs.get(sessionID)
+    if (!st || st.phase === "idle" || st.phase === "frozen") return
+    if (st.assistantMessageID && assistantMessageID && st.assistantMessageID !== assistantMessageID) return
+    st.firstTokenAt = st.firstTokenAt ?? now
+    if (st.phase === "prefill") st.phase = "generate"
   }
 
   pushDelta(sessionID: string, delta: string, now: number, assistantMessageID?: string): void {
@@ -315,6 +333,12 @@ export class SpeedTracker {
     if (output !== undefined) {
       st.settledGenTokens = output + reasoning
       st.tokensEstimated = false
+      // A stream-metered step has no metric rate to keep. Settle its average
+      // over the same clock (first content to step end) so the frozen line
+      // reads the turn's real decode instead of the window's last frame.
+      if (st.lastGenTps === null && st.firstTokenAt !== null && now > st.firstTokenAt) {
+        st.lastGenTps = st.settledGenTokens / ((now - st.firstTokenAt) / 1000)
+      }
     }
 
     // The step's call is over, so its prefill is over — even when usage never

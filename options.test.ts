@@ -85,3 +85,12 @@ test("the options say whether the user pinned the log path", () => {
   assert.equal(pinned.logPath, null)
   assert.equal(resolveOptions({ metricsUrl: "   " }).metricsUrl, DEFAULTS.metricsUrl, "whitespace is not a URL")
 })
+
+test("provider names whose sessions the local feed is allowed to meter", () => {
+  assert.equal(resolveOptions(undefined).provider, "mlx-serve")
+  assert.equal(resolveOptions({ provider: "anthropic" }).provider, "anthropic")
+  assert.equal(resolveOptions({ provider: "  ollama  " }).provider, "ollama", "trimmed")
+  assert.equal(resolveOptions({ provider: null }).provider, null, "null accepts the feed for every session")
+  assert.equal(resolveOptions({ provider: "" }).provider, "mlx-serve", "a blank value is the default, not a wildcard")
+  assert.equal(resolveOptions({ provider: 7 as unknown }).provider, "mlx-serve")
+})

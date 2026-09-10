@@ -32,6 +32,14 @@ export interface ServeOptions {
   /** null disables the log tail (remote server, or the server ran --log-file off). */
   readonly logPath: string | null
   readonly sections: SectionName[]
+  /**
+   * Provider ID whose sessions the mlx-serve metrics describe. A session whose
+   * step reports another provider is metered from its own stream instead
+   * (wait then TTFT for prefill, streamed bytes for decode); the local feed
+   * would otherwise attribute the wrong server's numbers to it. null accepts
+   * the feed for every session.
+   */
+  readonly provider: string | null
   /** Sparkline width in cells; 0 turns it off. */
   readonly sparkCells: number
   /** Prefill progress bar width in cells; 0 falls back to the plain rate. */
@@ -67,6 +75,7 @@ export const DEFAULTS: ServeOptions = {
   logSeconds: 5,
   logPath: null,
   sections: [...DEFAULT_SECTIONS],
+  provider: "mlx-serve",
   sparkCells: 24,
   barCells: 18,
   footerBarCells: 10,
@@ -120,6 +129,13 @@ export function resolveOptions(raw: Record<string, unknown> | undefined): ServeO
     logPath,
     // A malformed `sections` value falls back to the default, not to every section.
     sections: resolveSections(src.sections, DEFAULT_SECTIONS),
+    // null is "any provider"; a blank or malformed value falls back to the default.
+    provider:
+      src.provider === null
+        ? null
+        : typeof src.provider === "string" && src.provider.trim() !== ""
+          ? src.provider.trim()
+          : DEFAULTS.provider,
     sparkCells: clamp(src.sparkCells, DEFAULTS.sparkCells, 0, 60),
     barCells: clamp(src.barCells, DEFAULTS.barCells, 0, 40),
     footerBarCells: clamp(src.footerBarCells, DEFAULTS.footerBarCells, 0, 40),

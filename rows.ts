@@ -696,21 +696,37 @@ export function buildSections(input: PanelInput, enabled: readonly SectionName[]
 // ---------------------------------------------------------------------------
 
 /**
- * The footer's one line of turn stats, in exactly three shapes — a prefill
- * bar, a prefill rate, or a decode line — so the line never breathes while the
- * numbers move. Every slot draws in every shape, zero-filled: nothing pops in
- * or out mid-turn. ttft, age and history live in the panel, not here.
+ * The footer's one line of turn stats, in a fixed handful of shapes — a
+ * prefill bar, a prefill rate, a prefill wait, or a decode line — so the line
+ * never breathes while the numbers move. Every slot draws in every shape,
+ * zero-filled: nothing pops in or out mid-turn. ttft, age and history live in
+ * the panel, not here.
+ *
+ * Without mlx-serve metrics (any other provider), the stream is the meter:
+ * the prefill shape counts the wait up, and the decode shape shows the TTFT
+ * the provider took instead of a prefill rate it never reported.
  */
 export function footerLabel(speed: SpeedValue | null, options: FooterOptions = {}): string | null {
   if (!speed) return null
   if (speed.phase === "prefill") {
     const base = speed.prefillExpected
     if ((options.barCells ?? 0) > 0 && base !== null && base > 0) return prefillBarLine(speed, base, options.barCells ?? 0)
-    return prefillRateLine(speed)
+    if (speed.prefillTokens !== null || speed.prefillTps !== null) return prefillRateLine(speed)
+    // Nothing measured yet — and for a non-mlx-serve server, nothing ever will
+    // be: count the wait up. The API answers with TTFT when it starts.
+    return `prefill waiting · ${fmtDur(speed.elapsedMs)}`
   }
 
   const approx = speed.tokensEstimated ? "~" : ""
-  return `${approx}${fmtExact(speed.genTokens)} tok · decode ${approx}${fmtRate(speed.genTps ?? 0)} t/s · prefill ${fmtRate(speed.prefillTps ?? 0)} t/s`
+  // The third slot is the prefill this decode came out of: its rate when mlx-
+  // serve measured one, the TTFT the provider took when it did not.
+  const prefill =
+    speed.prefillTps !== null
+      ? `prefill ${fmtRate(speed.prefillTps)} t/s`
+      : speed.ttftMs !== null
+        ? `ttft ${fmtMs(speed.ttftMs)}`
+        : `prefill ${fmtRate(0)} t/s`
+  return `${approx}${fmtExact(speed.genTokens)} tok · decode ${approx}${fmtRate(speed.genTps ?? 0)} t/s · ${prefill}`
 }
 
 export interface FooterOptions {

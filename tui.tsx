@@ -4,7 +4,9 @@
  * prompt footer.
  *
  *   footer   — turn stats, always on: `~456 tok · decode ~24.0 t/s`, and a
- *              progress bar while a prompt is being prefilled.
+ *              progress bar while a prompt is being prefilled. Sessions on
+ *              another provider are metered from their own stream (wait, then
+ *              TTFT, then streamed bytes) instead of this server's feed.
  *   sidebar  — server throughput and serving totals, model card and sampling,
  *              prefix cache, memory, MTP acceptance, server log.
  *
@@ -184,6 +186,24 @@ const definition = {
     const activeSessions = new Set<string>()
     let lastSession: string | null = null
 
+    /**
+     * Which provider each session's current step is served by, from the step's
+     * own model. A session we have not heard a step from stays eligible; the
+     * first `session.step.started` settles it, and `beginStep` resets the run's
+     * metered state either way. Only a known mismatch turns the local feed off
+     * for that session, so a remote provider is metered from its own stream.
+     */
+    const sessionProviders = new Map<string, string | null>()
+    function noteProvider(sid: string, stepModel: unknown): void {
+      const providerID = (stepModel as { providerID?: unknown } | null | undefined)?.providerID
+      sessionProviders.set(sid, typeof providerID === "string" ? providerID : null)
+    }
+    function metricsEligible(sid: string): boolean {
+      if (options.provider === null) return true
+      const provider = sessionProviders.get(sid)
+      return provider === undefined || provider === null || provider === options.provider
+    }
+
     // Server busyness is cached instead of recomputed eight times a second: the
     // tick only needs to know whether anything is still decoding.
     let serverBusyUntil = 0
@@ -309,7 +329,11 @@ const definition = {
         if (link === "live") {
           service.sample(parseFeed(res.body as RawMetricsJson), now)
           const sample = parseMetricsJson(res.body as MetricsJson, now)
-          for (const sessionID of activeSessions) tracker.applyMetrics(sessionID, sample)
+          for (const sessionID of activeSessions) {
+            // A session on another provider cannot use this server's numbers:
+            // its meter comes from its own stream instead.
+            if (metricsEligible(sessionID)) tracker.applyMetrics(sessionID, sample)
+          }
           const stats = service.statsAt(now)
           // The gauges are server-wide: another client's work is not a reason to
           // keep polling four times a second with nothing of ours to draw.
@@ -538,8 +562,22 @@ const definition = {
         const sid = sessionIDOf(e)
         if (sid === "") return
         claim(sid)
+        noteProvider(sid, e.data.model)
         tracker.beginStep(sid, assistantOf(e), createdAt(e))
         startUi()
+      }),
+      listen("session.step.streamed", (e) => {
+        if (!instanceIsOurs() || !isNewEvent(e)) return
+        const sid = sessionIDOf(e)
+        if (sid === "") return
+        tracker.markStreamed(sid, assistantOf(e), createdAt(e))
+        startUi()
+      }),
+      listen("session.model.selected", (e) => {
+        if (!instanceIsOurs() || !isNewEvent(e)) return
+        const sid = sessionIDOf(e)
+        if (sid === "") return
+        noteProvider(sid, e.data.model)
       }),
       listen("session.step.ended", finishStep),
       listen("session.step.failed", finishStep),
@@ -552,6 +590,7 @@ const definition = {
         const sid = sessionIDOf(e)
         tracker.evict(sid)
         activeSessions.delete(sid)
+        sessionProviders.delete(sid)
         if (lastSession === sid) lastSession = null
         startUi()
       }),

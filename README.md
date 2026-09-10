@@ -35,14 +35,16 @@ meter stays in the footer.
 
 ## Footer meter
 
-The footer draws one line in exactly three shapes, so it never breathes while
-the numbers move. Every slot draws in every shape, zero-filled — nothing pops
-in or out mid-turn:
+The footer draws one line in a fixed handful of shapes, so it never breathes
+while the numbers move. Every slot draws in every shape, zero-filled — nothing
+pops in or out mid-turn:
 
 ```
-prefill ███░░░░░░░ 12,400/48,000 · 1600 t/s · ~22s left   ← prefilling
+prefill ███░░░░░░░ 12,400/48,000 · 1600 t/s · ~22s left   ← prefilling, mlx-serve
 prefill 8,192 tok · 6827 t/s                              ← prefilling, server silent on the total
-1,833 tok · decode 24.0 t/s · prefill 10.0k t/s           ← decoding
+prefill waiting · 2.4s                                    ← prefilling a provider with no metrics feed
+1,833 tok · decode 24.0 t/s · prefill 10.0k t/s           ← decoding mlx-serve
+1,833 tok · decode ~22.5 t/s · ttft 2.40s                 ← decoding any other provider
 0 tok · decode 0.0 t/s · prefill 0.0 t/s                  ← quiet zeros between steps
 ```
 
@@ -59,6 +61,24 @@ prefill 8,192 tok · 6827 t/s                              ← prefilling, serve
   waiting, never `0/…`.
 - A finished step retires the prefill phase even when no token ever flipped it,
   so the meter cannot freeze on a finished prefill between steps.
+
+### Sessions on other providers
+
+The local feed describes one machine. When a step's model reports a different
+provider — anything but `provider: "mlx-serve"` in the options; set it to `null`
+to meter every session from the feed — that session ignores the feed and is
+metered from its own API stream:
+
+- Prefill is the wait: the footer counts it up (`prefill waiting · 2.4s`).
+  `session.step.streamed`, the host's first-streamed-content event, fixes the
+  TTFT when the provider starts answering.
+- Decode is the streamed-byte estimate (`~22.5 t/s`), scaled by `bytesPerToken`
+  exactly as the mlx-serve fallback is.
+- At `session.step.ended` the provider's usage (`input − cache.read`) over that
+  TTFT settles a prefill rate, and the decode shape's third slot shows
+  `prefill 4.5k t/s` instead of `ttft 2.40s`. Without usage it keeps the TTFT.
+- The panel's Turn section draws the same numbers; the server sections still
+  describe the local mlx-serve, which is what they are for.
 
 ## Panel sections
 
@@ -187,6 +207,7 @@ restart.
         "metricsUrl": "http://127.0.0.1:11234/metrics.json",
         "metricsToken": "mlx-serve",
         "sections": ["throughput", "server", "cache", "memory", "spec", "sampling", "log"],
+        "provider": "mlx-serve",
         "sparkCells": 24,
         "barCells": 18,
         "footerBarCells": 10,
@@ -217,6 +238,10 @@ restart.
   ignored; an empty list draws nothing; a malformed value falls back to the
   default. Add `"turn"` or `"attach"` to opt those in; `attach` also appears by
   itself whenever a host integration threw.
+- `provider` names the provider whose sessions the local feed may meter
+  (default `"mlx-serve"`). A step whose model reports another provider is
+  metered from its own stream instead; `null` accepts the feed for every
+  session.
 - `sparkCells: 0` removes the sparkline; `barCells: 0` makes the panel prefill
   line a plain rate and `footerBarCells: 0` does the same for the footer;
   `ratioCells: 0` draws percentages without gauges.

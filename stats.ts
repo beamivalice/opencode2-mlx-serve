@@ -46,6 +46,8 @@ export interface WireGauges {
   memory_mb?: number
   generation_tokens_live?: number
   prefill_tokens_live?: number
+  /** Post-cache tail the running prefill will forward (0 when idle). */
+  prefill_tokens_expected?: number
   requests_prefilling?: number
   mlx_active_bytes?: number
   mlx_cache_bytes?: number
@@ -74,6 +76,7 @@ export interface FeedGauges {
   readonly memMb: number
   readonly genLive: number
   readonly prefillLive: number
+  readonly prefillExpected: number
   readonly prefilling: number
   readonly mlxActiveBytes: number
   readonly mlxCacheBytes: number
@@ -132,6 +135,7 @@ export function parseFeed(json: RawMetricsJson | null | undefined): MetricsFeed 
       memMb: num(g.memory_mb),
       genLive: num(g.generation_tokens_live),
       prefillLive: num(g.prefill_tokens_live),
+      prefillExpected: num(g.prefill_tokens_expected),
       prefilling: num(g.requests_prefilling),
       mlxActiveBytes: num(g.mlx_active_bytes),
       mlxCacheBytes: num(g.mlx_cache_bytes),
@@ -449,6 +453,10 @@ export interface ServiceStats {
   readonly genTps: number | null
   /** Live prefill tok/s over a wide window; null when nothing is prefilling. */
   readonly prefillTps: number | null
+  /** Prompt tokens forwarded so far by the running prefill; 0 when idle. */
+  readonly prefillLive: number
+  /** Post-cache tail the running prefill will forward; 0 when idle or unreported. */
+  readonly prefillExpected: number
   /** Cumulative prefill tok/s: forwarded tokens ÷ prefill time. */
   readonly avgPrefillTps: number | null
   /** Cumulative decode tok/s: generated tokens ÷ decode time. */
@@ -716,6 +724,10 @@ export class ServiceTracker {
       phase,
       genTps,
       prefillTps,
+      // The server publishes how far the running prefill has got and how far it
+      // will go; the pair is the Throughput section's real progress bar.
+      prefillLive: fresh ? feed.gauges.prefillLive : 0,
+      prefillExpected: fresh ? feed.gauges.prefillExpected : 0,
       // Forwarded tokens only: dividing BILLED prompt tokens by prefill time
       // overstates warm-cache prefill speed by prompt ÷ (prompt - cached).
       avgPrefillTps: ratio(feed.counters.prefillTokens, histSeconds(h.prefill_time_seconds)),

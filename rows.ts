@@ -305,13 +305,16 @@ function sameRate(rates: ReadonlyMap<string, number>, label: string, value: numb
  * whole panel when it does, so a finished prefill used to blink the panel twice:
  * once when the prefill line went away, once when it came back.
  *
- * With one request in flight the server's live rate is this turn's rate, so when
- * the Turn section already drew that number this row yields to the since-boot
- * average. It keeps the same label — and therefore the same line — to do it.
+ * While the server reports a running prefill with a known target, the `prefill`
+ * line becomes the real progress bar (`prefill ███ 12.4k/48.0k · 4.2k t/s`);
+ * the row keeps its label and its slot either way. With one request in flight
+ * the server's live rate is this turn's rate, so when the Turn section already
+ * drew that number the plain-rate form yields to the since-boot average.
  */
 function throughputRows(
   s: ServiceStats,
   cells: number,
+  barCells: number,
   already: ReadonlyMap<string, number>,
   inflight: number,
 ): SidebarRow[] {
@@ -325,7 +328,17 @@ function throughputRows(
     }
     return row(label, `${fmtRate(live)} t/s`, `· avg ${fmtRate(avg)}`)
   }
-  const rows = [rate("decode", s.genTps, s.avgGenTps), rate("prefill", s.prefillTps, s.avgPrefillTps)]
+  // The server publishes the running prefill's progress and its real target; the
+  // pair is a real bar, so the prefill line draws it while one is running.
+  const prefilling = barCells > 0 && s.prefillExpected > 0
+  const prefill = prefilling
+    ? row(
+        "prefill",
+        `${progressBar(s.prefillLive / s.prefillExpected, barCells)} ${fmtCount(s.prefillLive)}/${fmtCount(s.prefillExpected)}`,
+        s.prefillTps === null ? "· measuring" : `· ${fmtRate(s.prefillTps)} t/s`,
+      )
+    : rate("prefill", s.prefillTps, s.avgPrefillTps)
+  const rows = [rate("decode", s.genTps, s.avgGenTps), prefill]
   const spark = sparkline(s.genSeries, cells)
   if (spark !== "") rows.push(row("60s", spark))
   // Admissions per second over 60s. ~0.07 is one agent working; a jump is the
@@ -635,7 +648,7 @@ function rowsFor(name: SectionName, input: PanelInput): SidebarRow[] {
   const inflight = inflightOf(input)
   switch (name) {
     case "throughput":
-      return s === null ? [] : throughputRows(s, input.sparkCells, input.turnRates ?? new Map(), inflight)
+      return s === null ? [] : throughputRows(s, input.sparkCells, input.barCells ?? 0, input.turnRates ?? new Map(), inflight)
     case "server":
       return s === null ? [] : serverRows(s, input.sampling?.value ?? null, input.ratioCells ?? 0)
     case "cache":

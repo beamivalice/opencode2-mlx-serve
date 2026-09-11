@@ -42,9 +42,9 @@ export interface ServeOptions {
   readonly provider: string | null
   /** Sparkline width in cells; 0 turns it off. */
   readonly sparkCells: number
-  /** Prefill progress bar width in cells; 0 falls back to the plain rate. */
+  /** Prefill progress bar width in cells, capped at 12; 0 falls back to the plain rate. */
   readonly barCells: number
-  /** The same bar in the prompt footer, where room is scarce; 0 falls back to the plain rate. */
+  /** The same bar in the prompt footer; capped at 12, 0 falls back to the plain rate. */
   readonly footerBarCells: number
   /** Ratio-bar width in cells; 0 draws percentages only. */
   readonly ratioCells: number
@@ -77,8 +77,8 @@ export const DEFAULTS: ServeOptions = {
   sections: [...DEFAULT_SECTIONS],
   provider: "mlx-serve",
   sparkCells: 24,
-  barCells: 18,
-  footerBarCells: 10,
+  barCells: 12,
+  footerBarCells: 12,
   ratioCells: 8,
   diskCacheGb: null,
   wiredLimitGb: null,
@@ -137,8 +137,8 @@ export function resolveOptions(raw: Record<string, unknown> | undefined): ServeO
           ? src.provider.trim()
           : DEFAULTS.provider,
     sparkCells: clamp(src.sparkCells, DEFAULTS.sparkCells, 0, 60),
-    barCells: clamp(src.barCells, DEFAULTS.barCells, 0, 40),
-    footerBarCells: clamp(src.footerBarCells, DEFAULTS.footerBarCells, 0, 40),
+    barCells: clamp(src.barCells, DEFAULTS.barCells, 0, 12),
+    footerBarCells: clamp(src.footerBarCells, DEFAULTS.footerBarCells, 0, 12),
     ratioCells: clamp(src.ratioCells, DEFAULTS.ratioCells, 0, 20),
     // Only an explicit, sane number counts; anything else means no gauge.
     diskCacheGb:

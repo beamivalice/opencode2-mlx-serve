@@ -44,9 +44,9 @@ test("a junk config cannot make the panel spin or stall", () => {
   assert.equal(o.idlePollHz, DEFAULTS.idlePollHz, "a string rate falls back")
   assert.equal(o.bytesPerToken, DEFAULTS.bytesPerToken)
   assert.equal(o.sparkCells, 60)
-  assert.equal(o.barCells, 40, "the panel is wide, so the bar may be too")
-  assert.equal(o.footerBarCells, 40)
-  assert.equal(resolveOptions({}).footerBarCells, 10, "the footer bar ships short")
+  assert.equal(o.barCells, 12, "the prefill bar is capped at 12 blocks")
+  assert.equal(o.footerBarCells, 12)
+  assert.equal(resolveOptions({}).footerBarCells, 12, "the footer bar ships at the cap")
 })
 
 test("turn is opt-in for people who want it in the panel too", () => {

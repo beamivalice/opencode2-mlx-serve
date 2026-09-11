@@ -314,6 +314,29 @@ test("the footer prefill shapes zero-fill every slot", () => {
   )
 })
 
+test("the Throughput prefill line becomes the real progress bar", () => {
+  const busy = new ServiceTracker()
+  busy.sample(
+    feed({ gauges: { prefill_tokens_live: 12_000, prefill_tokens_expected: 48_000, requests_prefilling: 1, requests_running: 1 } }),
+    NOW - 1_000,
+  )
+  busy.sample(
+    feed({ gauges: { prefill_tokens_live: 24_000, prefill_tokens_expected: 48_000, requests_prefilling: 1, requests_running: 1 } }),
+    NOW,
+  )
+  const rows = section("throughput", input({ service: busy.statsAt(NOW), barCells: 12 }))
+  assert.match(
+    rows.find((l) => l.startsWith("prefill ")) ?? "",
+    /^prefill [█░]{12} 24\.0k\/48\.0k · 12\.0k t\/s$/,
+    "half the target fills half the 12-block bar",
+  )
+  // No target (idle, or an older build): the rate line stays.
+  assert.match(
+    section("throughput", input({ barCells: 12 })).find((l) => l.startsWith("prefill ")) ?? "",
+    /^prefill 0\.0 t\/s · avg/,
+  )
+})
+
 test("one client in flight: throughput does not repeat the turn's rate", () => {
   const busy = new ServiceTracker()
   busy.sample(feed({ gauges: { generation_tokens_live: 1000, requests_running: 1 } }), NOW - 1_000)

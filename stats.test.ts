@@ -79,6 +79,8 @@ test("parseFeed reads the live payload", () => {
   assert.equal(f.counters.prefillTokens, 132503)
   assert.equal(f.gauges.running, 1)
   assert.equal(f.gauges.genLive, 3094)
+  assert.equal(f.gauges.prefillExpected, 0, "an older capture has no expected gauge: zero, never NaN")
+  assert.equal(parseFeed(raw({ gauges: { prefill_tokens_live: 24_000, prefill_tokens_expected: 48_000 } })).gauges.prefillExpected, 48_000)
   assert.equal(f.gauges.mlxActiveBytes, 77386308302)
   assert.equal(f.histograms.decode_time_seconds?.count, 15)
 })

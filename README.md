@@ -40,7 +40,7 @@ while the numbers move. Every slot draws in every shape, zero-filled — nothing
 pops in or out mid-turn:
 
 ```
-prefill ███░░░░░░░ 12,400/48,000 · 1600 t/s · ~22s left   ← prefilling, mlx-serve
+prefill ███░░░░░░░░░ 12,400/48,000 · 1600 t/s · ~22s left   ← prefilling, mlx-serve
 prefill 8,192 tok · 6827 t/s                              ← prefilling, server silent on the total
 prefill waiting · 2.4s                                    ← prefilling a provider with no metrics feed
 1,833 tok · decode 24.0 t/s · prefill 10.0k t/s           ← decoding mlx-serve
@@ -89,7 +89,7 @@ absent.
 
 | Section | Rows |
 | --- | --- |
-| Throughput | `decode` and `prefill` tok/s, each on its own permanent line with its since-boot average behind it, a 60-second sparkline, admitted req/s |
+| Throughput | `decode` and `prefill` on permanent lines; while a prefill runs the `prefill` line is the real progress bar (`prefill ███ 24.0k/48.0k · 4.2k t/s`), otherwise it is the rate with its since-boot average; a 60-second sparkline and admitted req/s |
 | Server | live serving statistics, always in this order: `gpu` (0% is a reading, not a missing number), `running N · M waiting`, since-boot `tokens` in/out and `requests`, last request's `messages` and `tool calls` |
 | Prefix cache | share of billed prompt tokens restored from cache, share of requests with a hit, `hot` and `ssd` tiers gauged against their own caps |
 | Memory | a bar row `▮▮▮▮▮▮░░░░ 63%` with its ceiling dim behind it (`· of 117G wired`) when one is declared, else a plain `footprint` row; `mlx-serve` in-use vs pool, `free` RAM and peak, ANE bytes, n-gram table |
@@ -209,8 +209,8 @@ restart.
         "sections": ["throughput", "server", "cache", "memory", "spec", "sampling", "log"],
         "provider": "mlx-serve",
         "sparkCells": 24,
-        "barCells": 18,
-        "footerBarCells": 10,
+        "barCells": 12,
+        "footerBarCells": 12,
         "ratioCells": 8,
         "diskCacheGb": 100,
         "wiredLimitGb": null,
@@ -242,8 +242,9 @@ restart.
   (default `"mlx-serve"`). A step whose model reports another provider is
   metered from its own stream instead; `null` accepts the feed for every
   session.
-- `sparkCells: 0` removes the sparkline; `barCells: 0` makes the panel prefill
-  line a plain rate and `footerBarCells: 0` does the same for the footer;
+- `sparkCells: 0` removes the sparkline; `barCells` and `footerBarCells` are the
+  prefill progress-bar widths in the panel and footer, capped at **12** blocks
+  (both default to 12); set either to `0` to fall back to the plain rate;
   `ratioCells: 0` draws percentages without gauges.
 - `diskCacheGb` is the SSD tier cap in GiB (`--prefix-cache-disk`).
 - `wiredLimitGb` overrides the `iogpu.wired_limit_mb` sysctl.

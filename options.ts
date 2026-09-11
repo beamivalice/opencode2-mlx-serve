@@ -33,13 +33,15 @@ export interface ServeOptions {
   readonly logPath: string | null
   readonly sections: SectionName[]
   /**
-   * Provider ID whose sessions the mlx-serve metrics describe. A session whose
-   * step reports another provider is metered from its own stream instead
+   * Provider ids whose sessions the mlx-serve metrics describe. A session whose
+   * step reports any other provider is metered from its own stream instead
    * (wait then TTFT for prefill, streamed bytes for decode); the local feed
-   * would otherwise attribute the wrong server's numbers to it. null accepts
+   * would otherwise attribute the wrong server's numbers to it. Both names in
+   * the wild are accepted by default: the hand-written provider (`mlx-serve`)
+   * and the one `mlx-serve launch opencode2` registers (`mlx`). null accepts
    * the feed for every session.
    */
-  readonly provider: string | null
+  readonly provider: readonly string[] | null
   /** Sparkline width in cells; 0 turns it off. */
   readonly sparkCells: number
   /** Prefill progress bar width in cells, capped at 12; 0 falls back to the plain rate. */
@@ -75,7 +77,7 @@ export const DEFAULTS: ServeOptions = {
   logSeconds: 5,
   logPath: null,
   sections: [...DEFAULT_SECTIONS],
-  provider: "mlx-serve",
+  provider: ["mlx-serve", "mlx"],
   sparkCells: 24,
   barCells: 12,
   footerBarCells: 12,
@@ -86,6 +88,20 @@ export const DEFAULTS: ServeOptions = {
 
 export function clamp(value: unknown, fallback: number, min: number, max: number): number {
   return typeof value === "number" && Number.isFinite(value) ? Math.min(Math.max(value, min), max) : fallback
+}
+
+/**
+ * The provider ids a step may report for the local feed to meter its session.
+ * A string names one, a list names several, `null` accepts every session; a
+ * blank string, an empty list, or a malformed value falls back to the default
+ * pair (`mlx-serve`, the hand-written id, and `mlx`, the launcher's).
+ */
+function resolveProvider(raw: unknown): readonly string[] | null {
+  if (raw === null) return null
+  const candidates =
+    typeof raw === "string" ? [raw] : Array.isArray(raw) ? raw.filter((v): v is string => typeof v === "string") : []
+  const named = candidates.map((v) => v.trim()).filter((v) => v !== "")
+  return named.length > 0 ? named : DEFAULTS.provider
 }
 
 /** Scheme + host + port of a feed URL, so /props and /v1/models can be reached. */
@@ -129,13 +145,9 @@ export function resolveOptions(raw: Record<string, unknown> | undefined): ServeO
     logPath,
     // A malformed `sections` value falls back to the default, not to every section.
     sections: resolveSections(src.sections, DEFAULT_SECTIONS),
-    // null is "any provider"; a blank or malformed value falls back to the default.
-    provider:
-      src.provider === null
-        ? null
-        : typeof src.provider === "string" && src.provider.trim() !== ""
-          ? src.provider.trim()
-          : DEFAULTS.provider,
+    // null is "any provider". A string names one; a list names several; a blank
+    // or malformed value falls back to the default pair.
+    provider: resolveProvider(src.provider),
     sparkCells: clamp(src.sparkCells, DEFAULTS.sparkCells, 0, 60),
     barCells: clamp(src.barCells, DEFAULTS.barCells, 0, 12),
     footerBarCells: clamp(src.footerBarCells, DEFAULTS.footerBarCells, 0, 12),

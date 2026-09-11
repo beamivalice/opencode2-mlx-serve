@@ -201,7 +201,7 @@ const definition = {
     function metricsEligible(sid: string): boolean {
       if (options.provider === null) return true
       const provider = sessionProviders.get(sid)
-      return provider === undefined || provider === null || provider === options.provider
+      return provider === undefined || provider === null || options.provider.includes(provider)
     }
 
     // Server busyness is cached instead of recomputed eight times a second: the

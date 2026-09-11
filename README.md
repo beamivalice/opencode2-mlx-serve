@@ -64,10 +64,11 @@ prefill waiting · 2.4s                                    ← prefilling a prov
 
 ### Sessions on other providers
 
-The local feed describes one machine. When a step's model reports a different
-provider — anything but `provider: "mlx-serve"` in the options; set it to `null`
-to meter every session from the feed — that session ignores the feed and is
-metered from its own API stream:
+The local feed describes one machine. When a step's model reports another
+provider — anything not in the `provider` option (default: both `mlx-serve`,
+the hand-written id, and `mlx`, the one `mlx-serve launch opencode2` registers;
+set it to `null` to meter every session from the feed) — that session ignores
+the feed and is metered from its own API stream:
 
 - Prefill is the wait: the footer counts it up (`prefill waiting · 2.4s`).
   `session.step.streamed`, the host's first-streamed-content event, fixes the
@@ -207,7 +208,7 @@ restart.
         "metricsUrl": "http://127.0.0.1:11234/metrics.json",
         "metricsToken": "mlx-serve",
         "sections": ["throughput", "server", "cache", "memory", "spec", "sampling", "log"],
-        "provider": "mlx-serve",
+        "provider": ["mlx-serve", "mlx"],
         "sparkCells": 24,
         "barCells": 12,
         "footerBarCells": 12,
@@ -238,10 +239,11 @@ restart.
   ignored; an empty list draws nothing; a malformed value falls back to the
   default. Add `"turn"` or `"attach"` to opt those in; `attach` also appears by
   itself whenever a host integration threw.
-- `provider` names the provider whose sessions the local feed may meter
-  (default `"mlx-serve"`). A step whose model reports another provider is
-  metered from its own stream instead; `null` accepts the feed for every
-  session.
+- `provider` names the provider ids whose sessions the local feed may meter.
+  Defaults to `["mlx-serve", "mlx"]` — the hand-written and launcher-generated
+  ids. A string names one, a list names several, `null` accepts the feed for
+  every session. A step whose model reports any other provider is metered from
+  its own stream instead.
 - `sparkCells: 0` removes the sparkline; `barCells` and `footerBarCells` are the
   prefill progress-bar widths in the panel and footer, capped at **12** blocks
   (both default to 12); set either to `0` to fall back to the plain rate;

@@ -87,10 +87,12 @@ test("the options say whether the user pinned the log path", () => {
 })
 
 test("provider names whose sessions the local feed is allowed to meter", () => {
-  assert.equal(resolveOptions(undefined).provider, "mlx-serve")
-  assert.equal(resolveOptions({ provider: "anthropic" }).provider, "anthropic")
-  assert.equal(resolveOptions({ provider: "  ollama  " }).provider, "ollama", "trimmed")
+  assert.deepEqual(resolveOptions(undefined).provider, ["mlx-serve", "mlx"], "both ids in the wild")
+  assert.deepEqual(resolveOptions({ provider: "anthropic" }).provider, ["anthropic"], "a string names one")
+  assert.deepEqual(resolveOptions({ provider: ["a", "b"] }).provider, ["a", "b"], "a list names several")
+  assert.deepEqual(resolveOptions({ provider: "  ollama  " }).provider, ["ollama"], "trimmed")
   assert.equal(resolveOptions({ provider: null }).provider, null, "null accepts the feed for every session")
-  assert.equal(resolveOptions({ provider: "" }).provider, "mlx-serve", "a blank value is the default, not a wildcard")
-  assert.equal(resolveOptions({ provider: 7 as unknown }).provider, "mlx-serve")
+  assert.deepEqual(resolveOptions({ provider: "" }).provider, ["mlx-serve", "mlx"], "a blank value is the default, not a wildcard")
+  assert.deepEqual(resolveOptions({ provider: [] }).provider, ["mlx-serve", "mlx"])
+  assert.deepEqual(resolveOptions({ provider: 7 as unknown }).provider, ["mlx-serve", "mlx"])
 })
